@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -16,70 +19,77 @@ type RateProvider interface {
 	FetchRate(ctx context.Context, base, quote string) (decimal.Decimal, time.Time, error)
 }
 
-// ExchangeRatesAPIProvider — пример реализации поверх exchangeratesapi.io.
-// Бесплатный тариф отдаёт котировки только с базой EUR, поэтому для пар без
-// EUR цена считается как кросс-курс через EUR (rates[quote] / rates[base]).
-type ExchangeRatesAPIProvider struct {
+const maxResponseBody = 1 << 20
+
+// HTTPProvider fetches rates from a Frankfurter-compatible HTTP API. The
+// default endpoint does not require an API key and supports the limited
+// currency set required by the task.
+type HTTPProvider struct {
 	BaseURL string
-	APIKey  string
 	Client  *http.Client
 }
 
-func NewExchangeRatesAPIProvider(baseURL, apiKey string) *ExchangeRatesAPIProvider {
-	return &ExchangeRatesAPIProvider{
-		BaseURL: baseURL,
-		APIKey:  apiKey,
-		Client:  &http.Client{Timeout: 5 * time.Second},
+func NewHTTPProvider(baseURL string, timeout time.Duration) *HTTPProvider {
+	return &HTTPProvider{
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		Client:  &http.Client{Timeout: timeout},
 	}
 }
 
 type latestResponse struct {
-	Success   bool               `json:"success"`
-	Timestamp int64              `json:"timestamp"`
-	Base      string             `json:"base"`
-	Rates     map[string]float64 `json:"rates"`
-	Error     *struct {
-		Info string `json:"info"`
-	} `json:"error"`
+	Date  string                 `json:"date"`
+	Base  string                 `json:"base"`
+	Rates map[string]json.Number `json:"rates"`
 }
 
-func (p *ExchangeRatesAPIProvider) FetchRate(ctx context.Context, base, quote string) (decimal.Decimal, time.Time, error) {
-	url := fmt.Sprintf("%s/latest?access_key=%s&symbols=%s,%s", p.BaseURL, p.APIKey, base, quote)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (p *HTTPProvider) FetchRate(ctx context.Context, base, quote string) (decimal.Decimal, time.Time, error) {
+	endpoint, err := url.Parse(p.BaseURL + "/latest")
 	if err != nil {
-		return decimal.Zero, time.Time{}, err
+		return decimal.Zero, time.Time{}, fmt.Errorf("parse provider URL: %w", err)
 	}
+	query := endpoint.Query()
+	query.Set("from", base)
+	query.Set("to", quote)
+	endpoint.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return decimal.Zero, time.Time{}, fmt.Errorf("create provider request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := p.Client.Do(req)
 	if err != nil {
-		return decimal.Zero, time.Time{}, err
+		return decimal.Zero, time.Time{}, fmt.Errorf("request provider: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
+		return decimal.Zero, time.Time{}, fmt.Errorf("provider returned HTTP %d", resp.StatusCode)
+	}
 
 	var data latestResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return decimal.Zero, time.Time{}, err
-	}
-	if !data.Success {
-		msg := "unknown provider error"
-		if data.Error != nil {
-			msg = data.Error.Info
-		}
-		return decimal.Zero, time.Time{}, fmt.Errorf("provider error: %s", msg)
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody))
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
+		return decimal.Zero, time.Time{}, fmt.Errorf("decode provider response: %w", err)
 	}
 
-	rateTime := time.Unix(data.Timestamp, 0).UTC()
-
-	baseRate, ok := data.Rates[base]
-	if base == data.Base {
-		baseRate, ok = 1, true
+	rateTime, err := time.Parse("2006-01-02", data.Date)
+	if err != nil {
+		return decimal.Zero, time.Time{}, fmt.Errorf("parse provider rate date: %w", err)
 	}
-	quoteRate, okQ := data.Rates[quote]
-	if !ok || !okQ {
-		return decimal.Zero, time.Time{}, fmt.Errorf("no rate for %s/%s", base, quote)
+	if data.Base != base {
+		return decimal.Zero, time.Time{}, fmt.Errorf("provider returned base %q, expected %q", data.Base, base)
 	}
 
-	price := decimal.NewFromFloat(quoteRate).Div(decimal.NewFromFloat(baseRate))
-	return price, rateTime, nil
+	rate, ok := data.Rates[quote]
+	if !ok {
+		return decimal.Zero, time.Time{}, fmt.Errorf("provider response has no rate for %s", quote)
+	}
+	price, err := decimal.NewFromString(rate.String())
+	if err != nil || !price.IsPositive() {
+		return decimal.Zero, time.Time{}, fmt.Errorf("provider returned invalid rate for %s", quote)
+	}
+	return price, rateTime.UTC(), nil
 }

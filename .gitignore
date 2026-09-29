@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment files
+.env.local
+.env.*.local
+*.local.env
+
+# Go build and test artifacts
+/bin/
+/dist/
+/tmp/
+*.test
+*.out
+coverage*.txt
+coverage*.html
+

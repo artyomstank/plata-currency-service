@@ -3,10 +3,16 @@
 package domain
 
 import (
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
+)
+
+var (
+	ErrClaimLost = errors.New("job claim lost")
+	ErrNotFound  = errors.New("not found")
 )
 
 type JobStatus string
@@ -24,15 +30,16 @@ type Job struct {
 	Status       JobStatus
 	ErrorMessage string
 	Attempts     int
+	LeaseToken   uuid.UUID
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
 
 type QuoteValue struct {
-	ID        uuid.UUID
-	JobID     uuid.UUID
-	Pair      string
-	Price     decimal.Decimal
-	RateTime  time.Time
-	CreatedAt time.Time
+	ID         uuid.UUID
+	JobID      uuid.UUID
+	Pair       string
+	Price      decimal.Decimal
+	SourceTime time.Time
+	CreatedAt  time.Time
 }

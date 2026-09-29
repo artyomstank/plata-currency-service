@@ -2,23 +2,35 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"time"
 
-	decimalcodec "github.com/jackc/pgx-shopspring-decimal"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NewPool открывает пул соединений и регистрирует кодек для decimal.Decimal,
-// чтобы NUMERIC-колонки читались и писались напрямую в shopspring/decimal
-// без промежуточных строк/float.
-func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
+type PoolConfig struct {
+	DSN               string
+	MaxConns          int32
+	MinConns          int32
+	HealthCheckPeriod time.Duration
+}
+
+// NewPool creates and verifies a PostgreSQL connection pool.
+func NewPool(ctx context.Context, poolConfig PoolConfig) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(poolConfig.DSN)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse database DSN: %w", err)
 	}
-	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		decimalcodec.Register(conn.TypeMap())
-		return nil
+	cfg.MaxConns = poolConfig.MaxConns
+	cfg.MinConns = poolConfig.MinConns
+	cfg.HealthCheckPeriod = poolConfig.HealthCheckPeriod
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create database pool: %w", err)
 	}
-	return pgxpool.NewWithConfig(ctx, cfg)
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return pool, nil
 }

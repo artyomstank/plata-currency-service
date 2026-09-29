@@ -1,41 +1,65 @@
-// Package worker реализует фоновую обработку задач на обновление котировок.
-// Очередь живёт в Postgres: несколько инстансов сервиса могут запускать
-// воркер одновременно — SELECT ... FOR UPDATE SKIP LOCKED гарантирует, что
-// конкретную задачу возьмёт в работу только один из них, а при падении
-// инстанса задача просто останется в БД со статусом processing/pending для
-// последующей обработки (см. README про доработку зависших processing).
+// Package worker implements background processing of quote update jobs.
 package worker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"currency-quotes/internal/domain"
 	"currency-quotes/internal/provider"
-	"currency-quotes/internal/storage"
 )
 
-// maxAttempts зарезервировано под ретраи с backoff — см. TODO в processOnce.
-const maxAttempts = 5
+const publicProviderError = "quote provider is temporarily unavailable"
+
+type Queue interface {
+	ClaimNextPending(ctx context.Context, leaseDuration time.Duration) (*domain.Job, error)
+	Complete(ctx context.Context, id, leaseToken uuid.UUID, value domain.QuoteValue) error
+	RetryOrFail(
+		ctx context.Context,
+		id, leaseToken uuid.UUID,
+		attempts, maxAttempts int,
+		nextAttemptAt time.Time,
+		publicError string,
+	) error
+}
+
+type Config struct {
+	PollInterval  time.Duration
+	LeaseDuration time.Duration
+	RetryBase     time.Duration
+	RetryMax      time.Duration
+	MaxAttempts   int
+}
 
 type Worker struct {
-	jobs     *storage.JobsRepo
-	quotes   *storage.QuotesRepo
+	queue    Queue
 	provider provider.RateProvider
-	interval time.Duration
+	config   Config
 	log      *slog.Logger
+	now      func() time.Time
 }
 
-func New(jobs *storage.JobsRepo, quotes *storage.QuotesRepo, p provider.RateProvider, interval time.Duration, log *slog.Logger) *Worker {
-	return &Worker{jobs: jobs, quotes: quotes, provider: p, interval: interval, log: log}
+func New(queue Queue, p provider.RateProvider, config Config, log *slog.Logger) *Worker {
+	return &Worker{
+		queue:    queue,
+		provider: p,
+		config:   config,
+		log:      log,
+		now:      time.Now,
+	}
 }
 
-// Run — бесконечный цикл поллинга до отмены контекста. В cmd/service
-// запускается несколько горутин Run() параллельно (см. WorkerCount).
+// Run polls the persistent queue until ctx is cancelled. It performs one
+// immediate poll so a newly started instance does not wait for the first tick.
 func (w *Worker) Run(ctx context.Context) {
-	ticker := time.NewTicker(w.interval)
+	w.ProcessOne(ctx)
+
+	ticker := time.NewTicker(w.config.PollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -43,51 +67,87 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.processOnce(ctx)
+			w.ProcessOne(ctx)
 		}
 	}
 }
 
-func (w *Worker) processOnce(ctx context.Context) {
-	job, err := w.jobs.ClaimNextPending(ctx)
+// ProcessOne processes at most one available job and reports whether a job was
+// claimed. It is exported to make the worker deterministic in unit tests.
+func (w *Worker) ProcessOne(ctx context.Context) bool {
+	job, err := w.queue.ClaimNextPending(ctx, w.config.LeaseDuration)
 	if err != nil {
 		w.log.Error("claim job failed", "err", err)
-		return
+		return false
 	}
 	if job == nil {
-		return // очередь пуста
+		return false
 	}
 
 	base, quote, ok := splitPair(job.Pair)
 	if !ok {
-		_ = w.jobs.MarkFailed(ctx, job.ID, "invalid pair stored in job")
-		return
+		w.release(ctx, job, w.config.MaxAttempts, "stored currency pair is invalid")
+		return true
 	}
 
-	price, rateTime, err := w.provider.FetchRate(ctx, base, quote)
+	price, sourceTime, err := w.provider.FetchRate(ctx, base, quote)
 	if err != nil {
-		w.log.Warn("fetch rate failed", "pair", job.Pair, "err", err)
-		_ = w.jobs.MarkFailed(ctx, job.ID, err.Error())
-		// TODO: если job.Attempts < maxAttempts — вернуть задачу в pending
-		// с экспоненциальным backoff вместо немедленного failed.
-		return
+		w.log.Warn("fetch rate failed", "job_id", job.ID, "pair", job.Pair, "attempt", job.Attempts, "err", err)
+		w.release(ctx, job, job.Attempts, publicProviderError)
+		return true
 	}
 
-	err = w.quotes.Insert(ctx, domain.QuoteValue{
-		JobID:    job.ID,
-		Pair:     job.Pair,
-		Price:    price,
-		RateTime: rateTime,
+	err = w.queue.Complete(ctx, job.ID, job.LeaseToken, domain.QuoteValue{
+		JobID:      job.ID,
+		Pair:       job.Pair,
+		Price:      price,
+		SourceTime: sourceTime,
 	})
 	if err != nil {
-		w.log.Error("insert quote value failed", "err", err)
-		_ = w.jobs.MarkFailed(ctx, job.ID, err.Error())
-		return
+		if errors.Is(err, domain.ErrClaimLost) {
+			w.log.Warn("job claim expired before completion", "job_id", job.ID)
+			return true
+		}
+		w.log.Error("complete quote job failed", "job_id", job.ID, "err", err)
+		return true
 	}
 
-	if err := w.jobs.MarkDone(ctx, job.ID); err != nil {
-		w.log.Error("mark done failed", "err", err)
+	w.log.Info("quote job completed", "job_id", job.ID, "pair", job.Pair, "attempt", job.Attempts)
+	return true
+}
+
+func (w *Worker) release(ctx context.Context, job *domain.Job, attempts int, publicError string) {
+	nextAttemptAt := w.now().Add(w.retryDelay(attempts))
+	if err := w.queue.RetryOrFail(
+		ctx,
+		job.ID,
+		job.LeaseToken,
+		attempts,
+		w.config.MaxAttempts,
+		nextAttemptAt,
+		publicError,
+	); err != nil {
+		if errors.Is(err, domain.ErrClaimLost) {
+			w.log.Warn("job claim expired before release", "job_id", job.ID)
+			return
+		}
+		w.log.Error("release quote job failed", "job_id", job.ID, "err", err)
 	}
+}
+
+func (w *Worker) retryDelay(attempt int) time.Duration {
+	if attempt <= 1 {
+		return w.config.RetryBase
+	}
+
+	delay := w.config.RetryBase
+	for range attempt - 1 {
+		if delay >= w.config.RetryMax/2 {
+			return w.config.RetryMax
+		}
+		delay *= 2
+	}
+	return min(delay, w.config.RetryMax)
 }
 
 func splitPair(pair string) (base, quote string, ok bool) {

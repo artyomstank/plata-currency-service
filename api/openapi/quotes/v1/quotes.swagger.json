@@ -1,0 +1,217 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "quotes/v1/quotes.proto",
+    "version": "version not set"
+  },
+  "tags": [
+    {
+      "name": "QuotesService"
+    }
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/v1/quote-updates": {
+      "post": {
+        "summary": "Creates a quote update job. The optional Idempotency-Key HTTP header\nmakes repeated requests return the original job.",
+        "operationId": "QuotesService_UpdateQuote",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1UpdateQuoteResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1UpdateQuoteRequest"
+            }
+          }
+        ],
+        "tags": [
+          "QuotesService"
+        ]
+      }
+    },
+    "/v1/quote-updates/{jobId}": {
+      "get": {
+        "summary": "Возвращает статус/результат конкретной задачи обновления.",
+        "operationId": "QuotesService_GetQuoteUpdate",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetQuoteUpdateResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "QuotesService"
+        ]
+      }
+    },
+    "/v1/quotes/latest": {
+      "get": {
+        "summary": "Возвращает последнее известное значение котировки пары.",
+        "operationId": "QuotesService_GetLatestQuote",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetLatestQuoteResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "pair",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "QuotesService"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "protobufAny": {
+      "type": "object",
+      "properties": {
+        "@type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": {}
+    },
+    "rpcStatus": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/protobufAny"
+          }
+        }
+      }
+    },
+    "v1GetLatestQuoteResponse": {
+      "type": "object",
+      "properties": {
+        "pair": {
+          "type": "string"
+        },
+        "price": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1GetQuoteUpdateResponse": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "type": "string"
+        },
+        "pair": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/v1JobStatus"
+        },
+        "price": {
+          "type": "string",
+          "description": "Decimal string; present only for JOB_STATUS_DONE."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "errorMessage": {
+          "type": "string",
+          "description": "Public failure reason; present only for JOB_STATUS_FAILED."
+        }
+      }
+    },
+    "v1JobStatus": {
+      "type": "string",
+      "enum": [
+        "JOB_STATUS_UNSPECIFIED",
+        "JOB_STATUS_PENDING",
+        "JOB_STATUS_PROCESSING",
+        "JOB_STATUS_DONE",
+        "JOB_STATUS_FAILED"
+      ],
+      "default": "JOB_STATUS_UNSPECIFIED"
+    },
+    "v1UpdateQuoteRequest": {
+      "type": "object",
+      "properties": {
+        "pair": {
+          "type": "string",
+          "description": "Код пары в формате \"BASE/QUOTE\", например \"EUR/MXN\"."
+        }
+      }
+    },
+    "v1UpdateQuoteResponse": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/v1JobStatus"
+        }
+      }
+    }
+  }
+}

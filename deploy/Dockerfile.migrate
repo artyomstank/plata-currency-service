@@ -3,8 +3,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/service ./cmd/service
+RUN CGO_ENABLED=0 go build -trimpath -o /out/migrate ./cmd/migrate
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/service /service
-ENTRYPOINT ["/service"]
+COPY --from=build /out/migrate /migrate
+ENTRYPOINT ["/migrate"]

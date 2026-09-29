@@ -20,14 +20,6 @@ func NewQuotesRepo(pool *pgxpool.Pool) *QuotesRepo {
 	return &QuotesRepo{pool: pool}
 }
 
-func (r *QuotesRepo) Insert(ctx context.Context, v domain.QuoteValue) error {
-	_, err := r.pool.Exec(ctx, `
-		INSERT INTO quote_values (job_id, pair, price, rate_time)
-		VALUES ($1, $2, $3, $4)
-	`, v.JobID, v.Pair, v.Price, v.RateTime)
-	return err
-}
-
 func (r *QuotesRepo) GetByJobID(ctx context.Context, jobID uuid.UUID) (*domain.QuoteValue, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, job_id, pair, price, rate_time, created_at
@@ -49,10 +41,15 @@ func (r *QuotesRepo) GetLatest(ctx context.Context, pair string) (*domain.QuoteV
 
 func scanQuoteValue(row pgx.Row) (*domain.QuoteValue, error) {
 	var v domain.QuoteValue
-	err := row.Scan(&v.ID, &v.JobID, &v.Pair, &v.Price, &v.RateTime, &v.CreatedAt)
+	var price string
+	err := row.Scan(&v.ID, &v.JobID, &v.Pair, &price, &v.SourceTime, &v.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, domain.ErrNotFound
 	}
+	if err != nil {
+		return nil, err
+	}
+	v.Price, err = decimal.NewFromString(price)
 	if err != nil {
 		return nil, err
 	}

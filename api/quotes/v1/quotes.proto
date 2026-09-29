@@ -9,10 +9,11 @@ import "google/protobuf/timestamp.proto";
 
 // QuotesService — асинхронный сервис котировок валютных пар.
 service QuotesService {
-  // Ставит задачу на обновление котировки пары. Обработка идёт в фоне.
+  // Creates a quote update job. The optional Idempotency-Key HTTP header
+  // makes repeated requests return the original job.
   rpc UpdateQuote(UpdateQuoteRequest) returns (UpdateQuoteResponse) {
     option (google.api.http) = {
-      post: "/v1/quotes:update"
+      post: "/v1/quote-updates"
       body: "*"
     };
   }
@@ -20,7 +21,7 @@ service QuotesService {
   // Возвращает статус/результат конкретной задачи обновления.
   rpc GetQuoteUpdate(GetQuoteUpdateRequest) returns (GetQuoteUpdateResponse) {
     option (google.api.http) = {
-      get: "/v1/quotes/updates/{job_id}"
+      get: "/v1/quote-updates/{job_id}"
     };
   }
 
@@ -58,9 +59,10 @@ message GetQuoteUpdateResponse {
   string job_id = 1;
   string pair = 2;
   JobStatus status = 3;
-  string price = 4; // decimal как строка — без потери точности
-  google.protobuf.Timestamp rate_time = 5;
-  string error_message = 6;
+  optional string price = 4; // Decimal string; present only for JOB_STATUS_DONE.
+  google.protobuf.Timestamp updated_at = 5;
+  // Public failure reason; present only for JOB_STATUS_FAILED.
+  optional string error_message = 6;
 }
 
 message GetLatestQuoteRequest {
@@ -70,5 +72,5 @@ message GetLatestQuoteRequest {
 message GetLatestQuoteResponse {
   string pair = 1;
   string price = 2;
-  google.protobuf.Timestamp rate_time = 3;
+  google.protobuf.Timestamp updated_at = 3;
 }
