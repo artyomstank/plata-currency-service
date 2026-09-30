@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"currency-quotes/internal/domain"
+	"currency-quotes/internal/usecase"
 )
 
 type JobsRepo struct {
@@ -21,153 +22,149 @@ func NewJobsRepo(pool *pgxpool.Pool) *JobsRepo {
 	return &JobsRepo{pool: pool}
 }
 
-// CreateJob creates a pending job. If an idempotency key already exists, the
-// original job is returned and created is false.
-func (r *JobsRepo) CreateJob(ctx context.Context, pair, idempotencyKey string) (*domain.Job, bool, error) {
-	row := r.pool.QueryRow(ctx, `
-		INSERT INTO quote_jobs (pair, status, idempotency_key)
-		VALUES ($1, 'pending', NULLIF($2, ''))
-		ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
-		DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
-		RETURNING id, pair, status, coalesce(error_message, ''), attempts,
-		          created_at, updated_at, (xmax = 0) AS created
-	`, pair, idempotencyKey)
-
-	var j domain.Job
-	var jobID uuid.UUID
-	var created bool
-	if err := row.Scan(
-		&jobID,
-		&j.Pair,
-		&j.Status,
-		&j.ErrorMessage,
-		&j.Attempts,
-		&j.CreatedAt,
-		&j.UpdatedAt,
-		&created,
-	); err != nil {
-		return nil, false, fmt.Errorf("create quote job: %w", err)
-	}
-	j.ID = domain.JobID(jobID)
-	return &j, created, nil
+// jobModel is the PostgreSQL representation; the domain never sees SQL types.
+type jobModel struct {
+	ID             uuid.UUID
+	Pair           string
+	IdempotencyKey string
+	Status         string
+	ErrorMessage   string
+	Attempts       int
+	LeaseToken     uuid.UUID
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
-// ClaimNextPending атомарно забирает одну задачу в работу (SKIP LOCKED).
-// Это позволяет запускать несколько инстансов сервиса одновременно без
-// дублирования обработки одной и той же задачи.
-func (r *JobsRepo) ClaimNextPending(ctx context.Context, leaseDuration time.Duration) (*domain.Job, error) {
-	leaseSeconds := max(int64(leaseDuration/time.Second), 1)
-	row := r.pool.QueryRow(ctx, `
-		UPDATE quote_jobs
-		SET status = 'processing',
-		    attempts = attempts + 1,
-		    lease_token = gen_random_uuid(),
-		    lease_until = now() + ($1 * interval '1 second'),
-		    updated_at = now()
-		WHERE id = (
-			SELECT id FROM quote_jobs
-			WHERE (status = 'pending' AND next_attempt_at <= now())
-			   OR (status = 'processing' AND (lease_until IS NULL OR lease_until <= now()))
-			ORDER BY next_attempt_at, created_at
-			FOR UPDATE SKIP LOCKED
-			LIMIT 1
-		)
-		RETURNING id, pair, status, attempts, lease_token, created_at, updated_at
-	`, leaseSeconds)
-
-	var j domain.Job
-	var jobID uuid.UUID
-	err := row.Scan(&jobID, &j.Pair, &j.Status, &j.Attempts, &j.LeaseToken, &j.CreatedAt, &j.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+func jobToModel(job *domain.Job) jobModel {
+	return jobModel{
+		ID: uuid.UUID(job.ID), Pair: job.Pair, IdempotencyKey: job.IdempotencyKey,
+		Status: string(job.Status), ErrorMessage: job.ErrorMessage, Attempts: job.Attempts,
+		LeaseToken: job.LeaseToken, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	}
-	if err != nil {
+}
+
+func (m jobModel) toDomain() *domain.Job {
+	return &domain.Job{
+		ID: domain.JobID(m.ID), Pair: m.Pair, IdempotencyKey: m.IdempotencyKey,
+		Status: domain.JobStatus(m.Status), ErrorMessage: m.ErrorMessage, Attempts: m.Attempts,
+		LeaseToken: m.LeaseToken, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
+	}
+}
+
+const jobColumns = `id, pair, coalesce(idempotency_key, ''), status,
+ coalesce(error_message, ''), attempts,
+ coalesce(lease_token, '00000000-0000-0000-0000-000000000000'::uuid), created_at, updated_at`
+
+func jobScanFields(m *jobModel) []any {
+	return []any{&m.ID, &m.Pair, &m.IdempotencyKey, &m.Status, &m.ErrorMessage,
+		&m.Attempts, &m.LeaseToken, &m.CreatedAt, &m.UpdatedAt}
+}
+
+func scanJob(row pgx.Row) (*domain.Job, error) {
+	var m jobModel
+	if err := row.Scan(jobScanFields(&m)...); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrNotFound
+		}
 		return nil, err
 	}
-	j.ID = domain.JobID(jobID)
-	return &j, nil
+	return m.toDomain(), nil
 }
 
-// Complete stores the quote and marks its job done in one transaction. The
-// lease token prevents a stale worker from completing a reclaimed job.
-func (r *JobsRepo) Complete(ctx context.Context, id domain.JobID, leaseToken uuid.UUID, value domain.QuoteValue) error {
-	tx, err := r.pool.Begin(ctx)
+// Create persists the domain constructor's identity and timestamps. Conflict
+// handling remains atomic even with concurrent requests using the same key.
+func (r *JobsRepo) Create(ctx context.Context, job *domain.Job) (*domain.Job, bool, error) {
+	tx, err := requireTransaction(ctx)
 	if err != nil {
-		return fmt.Errorf("begin completion transaction: %w", err)
+		return nil, false, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	result, err := tx.Exec(ctx, `
-		UPDATE quote_jobs
-		SET status = 'done', error_message = NULL, lease_token = NULL,
-		    lease_until = NULL, updated_at = now()
-		WHERE id = $1 AND status = 'processing' AND lease_token = $2
-	`, uuid.UUID(id), leaseToken)
-	if err != nil {
-		return fmt.Errorf("mark quote job done: %w", err)
+	m := jobToModel(job)
+	row := tx.QueryRow(ctx, `
+  INSERT INTO quote_jobs (id, pair, status, idempotency_key, created_at, updated_at)
+  VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6)
+  ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+  DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+  RETURNING `+jobColumns+`, (xmax = 0) AS created
+	`, m.ID, m.Pair, m.Status, m.IdempotencyKey, m.CreatedAt, m.UpdatedAt)
+	var stored jobModel
+	var created bool
+	fields := append(jobScanFields(&stored), &created)
+	if err := row.Scan(fields...); err != nil {
+		return nil, false, fmt.Errorf("create quote job: %w", err)
 	}
-	if result.RowsAffected() != 1 {
-		return domain.ErrClaimLost
-	}
-
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO quote_values (job_id, pair, price, rate_time)
-		VALUES ($1, $2, $3, $4)
-	`, uuid.UUID(id), value.Pair, value.Price.String(), value.SourceTime); err != nil {
-		return fmt.Errorf("insert quote value: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit quote completion: %w", err)
-	}
-	return nil
-}
-
-// RetryOrFail releases the current lease. Failed jobs are returned to pending
-// until maxAttempts is reached; nextAttemptAt implements persistent backoff.
-func (r *JobsRepo) RetryOrFail(
-	ctx context.Context,
-	id domain.JobID,
-	leaseToken uuid.UUID,
-	attempts, maxAttempts int,
-	nextAttemptAt time.Time,
-	publicError string,
-) error {
-	status := domain.JobStatusPending
-	if attempts >= maxAttempts {
-		status = domain.JobStatusFailed
-	}
-
-	result, err := r.pool.Exec(ctx, `
-		UPDATE quote_jobs
-		SET status = $3, error_message = $4, next_attempt_at = $5,
-		    lease_token = NULL, lease_until = NULL, updated_at = now()
-		WHERE id = $1 AND status = 'processing' AND lease_token = $2
-	`, uuid.UUID(id), leaseToken, status, publicError, nextAttemptAt)
-	if err != nil {
-		return fmt.Errorf("release quote job: %w", err)
-	}
-	if result.RowsAffected() != 1 {
-		return domain.ErrClaimLost
-	}
-	return nil
+	return stored.toDomain(), created, nil
 }
 
 func (r *JobsRepo) GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error) {
-	row := r.pool.QueryRow(ctx, `
-		SELECT id, pair, status, coalesce(error_message, ''), attempts, created_at, updated_at
-		FROM quote_jobs WHERE id = $1
-	`, uuid.UUID(id))
+	return scanJob(queryExecutor(ctx, r.pool).QueryRow(ctx,
+		`SELECT `+jobColumns+` FROM quote_jobs WHERE id = $1`, uuid.UUID(id)))
+}
 
-	var j domain.Job
-	var jobID uuid.UUID
-	err := row.Scan(&jobID, &j.Pair, &j.Status, &j.ErrorMessage, &j.Attempts, &j.CreatedAt, &j.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.ErrNotFound
-	}
+func (r *JobsRepo) GetByIDForUpdate(ctx context.Context, id domain.JobID) (*domain.Job, error) {
+	tx, err := requireTransaction(ctx)
 	if err != nil {
 		return nil, err
 	}
-	j.ID = domain.JobID(jobID)
-	return &j, nil
+	return scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM quote_jobs WHERE id = $1 FOR UPDATE`, uuid.UUID(id)))
+}
+
+// LockNextAvailable coordinates concurrent workers; business status and attempt
+// changes are performed by the domain in the use case, then persisted by Save.
+func (r *JobsRepo) LockNextAvailable(ctx context.Context) (*domain.Job, error) {
+	tx, err := requireTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	job, err := scanJob(tx.QueryRow(ctx, `
+  SELECT `+jobColumns+` FROM quote_jobs
+  WHERE (status = 'pending' AND next_attempt_at <= now())
+     OR (status = 'processing' AND (lease_until IS NULL OR lease_until <= now()))
+  ORDER BY next_attempt_at, created_at
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+	`))
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, nil
+	}
+	return job, err
+}
+
+// Save uses the old lease token as a compare-and-set guard. Domain transitions
+// clear the token; queue coordination data is persisted in the same update.
+func (r *JobsRepo) Save(ctx context.Context, job *domain.Job, update usecase.JobUpdate) error {
+	tx, err := requireTransaction(ctx)
+	if err != nil {
+		return err
+	}
+	m := jobToModel(job)
+	result, err := tx.Exec(ctx, `
+		UPDATE quote_jobs
+		SET status = $3, error_message = NULLIF($4, ''), attempts = $5,
+		    lease_token = $6, lease_until = $7,
+		    next_attempt_at = COALESCE($8, next_attempt_at), updated_at = $9
+		WHERE id = $1 AND lease_token IS NOT DISTINCT FROM $2::uuid
+		  AND status IN ('pending', 'processing')
+	`, m.ID, nullableUUID(update.ExpectedLeaseToken), m.Status, m.ErrorMessage, m.Attempts,
+		nullableUUID(m.LeaseToken), nullableTime(update.LeaseUntil), nullableTime(update.NextAttemptAt), m.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("save quote job: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return domain.ErrClaimLost
+	}
+	return nil
+}
+
+func nullableUUID(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
 }

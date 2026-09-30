@@ -64,6 +64,7 @@ func TestJobTransitionMatrix(t *testing.T) {
 		apply    func(*Job, *Quote) error
 	}{
 		{"start", JobStatusPending, JobStatusProcessing, func(j *Job, _ *Quote) error { return j.Start() }},
+		{"reclaim", JobStatusProcessing, JobStatusProcessing, func(j *Job, _ *Quote) error { return j.Reclaim() }},
 		{"complete", JobStatusProcessing, JobStatusDone, func(j *Job, q *Quote) error { return j.Complete(q) }},
 		{"retry", JobStatusProcessing, JobStatusPending, func(j *Job, _ *Quote) error { return j.RetryOrFail(3, "provider unavailable") }},
 		{"fail", JobStatusProcessing, JobStatusFailed, func(j *Job, _ *Quote) error { return j.Fail("permanent failure") }},
@@ -89,6 +90,20 @@ func TestJobTransitionMatrix(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestReclaimIncrementsAttemptsWithoutChangingIdentity(t *testing.T) {
+	job := newTestJob(t)
+	if err := job.Start(); err != nil {
+		t.Fatal(err)
+	}
+	id, pair := job.ID, job.Pair
+	if err := job.Reclaim(); err != nil {
+		t.Fatal(err)
+	}
+	if job.Attempts != 2 || job.Status != JobStatusProcessing || job.ID != id || job.Pair != pair {
+		t.Fatalf("unexpected reclaimed job: %+v", job)
 	}
 }
 

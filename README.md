@@ -6,16 +6,91 @@ PostgreSQL; клиент проверяет результат отдельны�
 
 ## Архитектура
 
-    client --HTTP/JSON--> currency-service --SQL--> PostgreSQL
-                            |
-                         workers
-                            |
-                     external rates API
+Вызовы между слоями во время работы сервиса:
+
+```mermaid
+flowchart LR
+    Client["Клиент"] -->|HTTP / JSON| HTTP["transport/http<br/>middleware / handler / DTO"]
+    Worker["worker<br/>опрос очереди"] -->|ProcessNext| UC["usecase<br/>сценарии приложения"]
+    HTTP -->|input + context| UC
+    UC -->|конструкторы и переходы статусов| Domain["domain<br/>Job / Quote"]
+    UC -->|WithinTransaction| TM["storage.TransactionManager"]
+    UC -->|JobsRepository| Jobs["storage.JobsRepo<br/>конвертеры джобы"]
+    UC -->|QuotesRepository| Quotes["storage.QuotesRepo<br/>конвертеры котировки"]
+    UC -->|RateProvider| Provider["provider.HTTPProvider"]
+    TM -->|BEGIN / COMMIT / ROLLBACK| DB[("PostgreSQL")]
+    Jobs -->|SQL, общий tx из context| DB
+    Quotes -->|SQL, общий tx из context| DB
+    Provider -->|HTTP| Rates["Frankfurter API"]
+```
+
+Usecase вызывает репозитории внутри callback менеджера транзакций. Менеджер
+передаёт общий `pgx.Tx` через контекст; репозитории выполняют SQL в этой
+транзакции. Для `GetLatest` достаточно одного чтения через пул. Проверка
+`/readyz` вызывает переданный из `cmd/service` callback `pool.Ping`.
+
+Направление импортов Go-пакетов отличается от направления вызовов:
+
+```mermaid
+flowchart TD
+    Main["cmd/service<br/>сборка зависимостей"] --> HTTP["transport/http"]
+    Main --> Worker["worker"]
+    Main --> UC["usecase<br/>ports.go: контракты инфраструктуры"]
+    Main --> Storage["storage"]
+    Main --> Provider["provider"]
+    Main --> Config["config"]
+    HTTP --> UC
+    HTTP --> Domain["domain"]
+    Storage --> UC
+    Storage --> Domain
+    Worker --> Domain
+    Config --> Domain
+    UC --> Domain
+```
+
+Стрелки на второй схеме означают импорты внутренних пакетов. Usecase зависит
+от домена и собственных интерфейсов; реализации передаются в `cmd/service`.
+`worker` вызывает usecase через свой интерфейс `JobProcessor`, поэтому ему
+не нужен импорт пакета `usecase`. Реализации удовлетворяют интерфейсам
+структурно. `storage` импортирует `usecase` для типа `JobUpdate`; `provider`
+не импортирует внутренние пакеты приложения. Домен не импортирует остальные
+слои приложения.
 
 Один процесс `cmd/service` обслуживает HTTP и запускает воркеры. Обработчики
-на стандартном `net/http` напрямую вызывают `internal/usecase`. Хранилище и
+используют `net/http` и chi, напрямую вызывая `internal/usecase`. Хранилище и
 очередь находятся в `internal/storage`, получение курса — в `internal/provider`,
-фоновая обработка — в `internal/worker`.
+сценарии фоновой обработки — в `internal/usecase`. `internal/worker` только
+опрашивает usecase и логирует ошибки.
+
+В `internal/transport/http` роутер и middleware находятся в `router.go` и
+`middleware.go`, HTTP-обработчики — в `handler.go`, DTO и конвертеры — в
+`dto.go`, общий обработчик ошибок — в `error.go`.
+
+Цепочка middleware: `Recoverer → RequestID → RequestLogger → RequestTimeout
+→ BodyLimit → chi router → HTTP handler`. Recoverer установлен первым и
+перехватывает паники во всей цепочке. Ошибки, возвращённые handler, попадают
+в общий ErrorHandler. Он сохраняет единый JSON-формат и не заменяет ответ,
+если заголовки уже отправлены. Panic-ответы используют тот же формат.
+
+В контексте передаётся request ID; данные задачи передаются явно через
+входные структуры use case. Конвертеры транспорта переводят JSON, URL и
+заголовки во входы сценариев, а результаты — в HTTP DTO. Проверка валютной
+пары остаётся в домене. Бизнес-обработчики транспорта передают операции с БД
+в usecase; транзакциями управляет usecase через `TransactionManager`.
+
+В usecase `quotes.go` содержит HTTP-сценарии, `jobs.go` — `ClaimPending`,
+`CompleteJob`, `RetryJob` и полный сценарий `ProcessNext`; контракты двух
+репозиториев, провайдера и менеджера транзакций находятся в `ports.go`.
+Новые джобы и котировки создаются через конструкторы домена, переходы статусов
+выполняют `Start`, `Reclaim`, `Complete`, `RetryOrFail` и `Fail`.
+
+`storage.TransactionManager.WithinTransaction` открывает транзакцию и передаёт
+её через приватный ключ контекста. Оба репозитория используют один `pgx.Tx`;
+usecase не зависит от pgx. Ошибка или panic откатывает транзакцию. Claim
+блокирует доступную строку через `FOR UPDATE SKIP LOCKED`; провайдер вызывается
+после commit, затем complete в одной транзакции сохраняет джобу и котировку.
+Complete и retry проверяют lease token под блокировкой строки. Репозитории
+конвертируют доменные сущности в свои модели PostgreSQL и обратно.
 
 Отдельного шлюза, gRPC, protobuf и генерации кода нет. Миграции запускаются
 отдельной командой `cmd/migrate`. HTTP-контракт описан ниже.
@@ -88,6 +163,54 @@ PostgreSQL; клиент проверяет результат отдельны�
 - `GET /readyz` — PostgreSQL доступна; при ошибке подключения возвращается 503.
 
 ## Фоновая обработка
+
+Успешная обработка одной джобы:
+
+```mermaid
+sequenceDiagram
+    participant W as worker
+    participant U as usecase
+    participant T as TransactionManager
+    participant J as JobsRepo
+    participant D as domain
+    participant P as HTTPProvider
+    participant Q as QuotesRepo
+
+    W->>U: ProcessNext(ctx)
+    U->>T: WithinTransaction(ctx, claim callback)
+    T->>T: BEGIN, context с tx
+    T->>U: claim callback(txCtx)
+    U->>J: LockNextAvailable(txCtx)
+    J-->>U: заблокированная Job
+    U->>D: Job.Start() / Job.Reclaim()
+    U->>J: Save(txCtx, job, lease)
+    U-->>T: nil
+    T->>T: COMMIT
+    T-->>U: claim сохранён
+
+    U->>P: FetchRate(ctx, base, quote)
+    P-->>U: price, sourceTime
+
+    U->>T: WithinTransaction(ctx, complete callback)
+    T->>T: BEGIN, context с tx
+    T->>U: complete callback(txCtx)
+    U->>J: GetByIDForUpdate(txCtx, jobID)
+    J-->>U: Job с актуальным lease token
+    Note over U,J: usecase проверяет lease token
+    U->>D: NewQuote(...), Job.Complete(quote)
+    U->>J: Save(txCtx, job, expectedLeaseToken)
+    U->>Q: Save(txCtx, quote)
+    U-->>T: nil
+    T->>T: COMMIT
+    T-->>U: обе записи сохранены
+    U-->>W: claimed=true, err=nil
+```
+
+Во время вызова провайдера транзакция claim уже закрыта. При ошибке провайдера
+usecase запускает отдельную транзакцию retry: блокирует джобу, проверяет lease,
+вызывает `Job.RetryOrFail` и сохраняет статус с временем следующей попытки.
+Ошибка внутри callback откатывает все его записи; ошибка claim или complete
+не позволяет usecase вернуть успешный результат обработки.
 
 `quote_jobs` служит очередью в PostgreSQL. `FOR UPDATE SKIP LOCKED` позволяет
 воркерам забирать разные задачи. Lease и токен защищают от завершения задачи
@@ -180,3 +303,12 @@ SQL встроен в migrator. После добавления миграции
     make test
     go test -race ./...
     go vet ./...
+
+Интеграционные тесты нового usecase и PostgreSQL-репозиториев:
+
+    go test -tags=integration ./internal/storage
+
+Они требуют PostgreSQL только на `localhost:54322`, database/user/password —
+`postgres`. Тесты создают временные таблицы в отдельном соединении; существующие
+таблицы и данные приложения не меняются. Проверяются идемпотентность, rollback
+обоих репозиториев, повторный claim просроченного lease и retry/backoff.

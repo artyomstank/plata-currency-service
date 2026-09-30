@@ -1,5 +1,4 @@
-// Package usecase содержит бизнес-логику сервиса котировок, не зависящую от
-// HTTP-транспорта — это позволяет тестировать её unit-тестами без сети и БД.
+// Package usecase coordinates domain entities, repositories and the provider.
 package usecase
 
 import (
@@ -7,36 +6,56 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"currency-quotes/internal/domain"
 )
 
 var (
 	ErrInvalidPair         = domain.ErrInvalidPair
-	ErrInvalidIdempotency  = errors.New("invalid idempotency key")
+	ErrInvalidIdempotency  = domain.ErrInvalidIdempotency
 	ErrIdempotencyConflict = errors.New("idempotency key is already used for another pair")
 	ErrJobNotFound         = errors.New("quote update not found")
 	ErrQuoteNotFound       = errors.New("quote not found")
 )
 
 type QuotesUseCase struct {
-	jobs       JobsRepository
-	quotes     QuotesRepository
-	currencies []string
+	jobs     JobsRepository
+	quotes   QuotesRepository
+	tx       TransactionManager
+	provider RateProvider
+	config   Config
+	now      func() time.Time
 }
 
-type JobsRepository interface {
-	CreateJob(ctx context.Context, pair, idempotencyKey string) (*domain.Job, bool, error)
-	GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error)
+type Config struct {
+	AllowedCurrencies []string
+	LeaseDuration     time.Duration
+	MaxAttempts       int
+	RetryBase         time.Duration
+	RetryMax          time.Duration
 }
 
-type QuotesRepository interface {
-	GetByJobID(ctx context.Context, jobID domain.JobID) (*domain.QuoteValue, error)
-	GetLatest(ctx context.Context, pair string) (*domain.QuoteValue, error)
+// New receives configuration already validated by the composition root.
+func New(jobs JobsRepository, quotes QuotesRepository, tx TransactionManager, provider RateProvider, config Config) *QuotesUseCase {
+	config.AllowedCurrencies = slices.Clone(config.AllowedCurrencies)
+	return &QuotesUseCase{
+		jobs: jobs, quotes: quotes, tx: tx, provider: provider,
+		config: config, now: time.Now,
+	}
 }
 
-func New(jobs JobsRepository, quotes QuotesRepository, allowedCurrencies []string) *QuotesUseCase {
-	return &QuotesUseCase{jobs: jobs, quotes: quotes, currencies: slices.Clone(allowedCurrencies)}
+type RequestQuoteUpdateInput struct {
+	Pair           string
+	IdempotencyKey string
+}
+
+type GetQuoteUpdateInput struct {
+	JobID domain.JobID
+}
+
+type GetLatestQuoteInput struct {
+	Pair string
 }
 
 type RequestUpdateResult struct {
@@ -44,52 +63,64 @@ type RequestUpdateResult struct {
 	Created bool
 }
 
-func (uc *QuotesUseCase) RequestUpdate(ctx context.Context, rawPair, idempotencyKey string) (*RequestUpdateResult, error) {
-	pair, err := domain.NormalizePair(rawPair, uc.currencies)
+func (uc *QuotesUseCase) RequestUpdate(ctx context.Context, input RequestQuoteUpdateInput) (*RequestUpdateResult, error) {
+	job, err := domain.NewJob(input.Pair, input.IdempotencyKey, uc.config.AllowedCurrencies)
 	if err != nil {
 		return nil, err
 	}
-	if len(idempotencyKey) > 128 {
-		return nil, fmt.Errorf("%w: maximum length is 128 characters", ErrInvalidIdempotency)
-	}
-
-	job, created, err := uc.jobs.CreateJob(ctx, pair, idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
-	if job.Pair != pair {
-		return nil, ErrIdempotencyConflict
-	}
-	return &RequestUpdateResult{Job: job, Created: created}, nil
-}
-
-type JobResult struct {
-	Job   *domain.Job
-	Value *domain.QuoteValue // nil, если задача ещё не завершена успехом
-}
-
-func (uc *QuotesUseCase) GetJobResult(ctx context.Context, id domain.JobID) (*JobResult, error) {
-	job, err := uc.jobs.GetByID(ctx, id)
-	if errors.Is(err, domain.ErrNotFound) {
-		return nil, ErrJobNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	result := &JobResult{Job: job}
-	if job.Status == domain.JobStatusDone {
-		v, err := uc.quotes.GetByJobID(ctx, id)
+	var result *RequestUpdateResult
+	err = uc.tx.WithinTransaction(ctx, func(txCtx context.Context) error {
+		stored, created, err := uc.jobs.Create(txCtx, job)
 		if err != nil {
-			return nil, fmt.Errorf("load value for completed quote update: %w", err)
+			return fmt.Errorf("create quote update: %w", err)
 		}
-		result.Value = v
+		if stored.Pair != job.Pair {
+			return ErrIdempotencyConflict
+		}
+		result = &RequestUpdateResult{Job: stored, Created: created}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
-func (uc *QuotesUseCase) GetLatest(ctx context.Context, rawPair string) (*domain.QuoteValue, error) {
-	pair, err := domain.NormalizePair(rawPair, uc.currencies)
+type JobResult struct {
+	Job   *domain.Job
+	Value *domain.Quote // nil until the job completes successfully
+}
+
+func (uc *QuotesUseCase) GetJobResult(ctx context.Context, input GetQuoteUpdateInput) (*JobResult, error) {
+	if input.JobID == (domain.JobID{}) {
+		return nil, domain.ErrInvalidJobID
+	}
+	var result *JobResult
+	err := uc.tx.WithinTransaction(ctx, func(txCtx context.Context) error {
+		job, err := uc.jobs.GetByID(txCtx, input.JobID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return ErrJobNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("load quote update: %w", err)
+		}
+		result = &JobResult{Job: job}
+		if job.Status == domain.JobStatusDone {
+			result.Value, err = uc.quotes.GetByJobID(txCtx, input.JobID)
+			if err != nil {
+				return fmt.Errorf("load value for completed quote update: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (uc *QuotesUseCase) GetLatest(ctx context.Context, input GetLatestQuoteInput) (*domain.Quote, error) {
+	pair, err := domain.NormalizePair(input.Pair, uc.config.AllowedCurrencies)
 	if err != nil {
 		return nil, err
 	}

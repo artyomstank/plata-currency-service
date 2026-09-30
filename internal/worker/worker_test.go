@@ -7,125 +7,45 @@ import (
 	"log/slog"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
-
-	"currency-quotes/internal/domain"
 )
 
-type queueStub struct {
-	job            *domain.Job
-	completedValue *domain.QuoteValue
-	retry          *retryCall
-}
+type processorFunc func(context.Context) (bool, error)
 
-type retryCall struct {
-	attempts      int
-	maxAttempts   int
-	nextAttemptAt time.Time
-	publicError   string
-}
+func (f processorFunc) ProcessNext(ctx context.Context) (bool, error) { return f(ctx) }
 
-func (q *queueStub) ClaimNextPending(context.Context, time.Duration) (*domain.Job, error) {
-	return q.job, nil
-}
-
-func (q *queueStub) Complete(_ context.Context, _ domain.JobID, _ uuid.UUID, value domain.QuoteValue) error {
-	q.completedValue = &value
-	return nil
-}
-
-func (q *queueStub) RetryOrFail(
-	_ context.Context,
-	_ domain.JobID, _ uuid.UUID,
-	attempts, maxAttempts int,
-	nextAttemptAt time.Time,
-	publicError string,
-) error {
-	q.retry = &retryCall{
-		attempts:      attempts,
-		maxAttempts:   maxAttempts,
-		nextAttemptAt: nextAttemptAt,
-		publicError:   publicError,
+func TestProcessOneDelegatesToUseCase(t *testing.T) {
+	for _, claimed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "empty", true: "claimed"}[claimed], func(t *testing.T) {
+			called := false
+			ctx := context.Background()
+			w := newTestWorker(processorFunc(func(got context.Context) (bool, error) {
+				called = true
+				if got != ctx {
+					t.Fatal("worker replaced context")
+				}
+				return claimed, nil
+			}))
+			if got := w.ProcessOne(ctx); got != claimed || !called {
+				t.Fatalf("claimed=%v called=%v", got, called)
+			}
+		})
 	}
-	return nil
 }
 
-type providerStub struct {
-	price    decimal.Decimal
-	rateTime time.Time
-	err      error
-}
-
-func (p providerStub) FetchRate(context.Context, string, string) (decimal.Decimal, time.Time, error) {
-	return p.price, p.rateTime, p.err
-}
-
-func TestProcessOneCompletesJob(t *testing.T) {
-	t.Parallel()
-
-	job := &domain.Job{
-		ID:         domain.NewJobID(),
-		Pair:       "EUR/MXN",
-		Status:     domain.JobStatusProcessing,
-		Attempts:   1,
-		LeaseToken: uuid.New(),
-	}
-	queue := &queueStub{job: job}
-	rateTime := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
-	w := newTestWorker(queue, providerStub{
-		price:    decimal.RequireFromString("20.12"),
-		rateTime: rateTime,
-	})
-
+func TestProcessOnePreservesClaimedOnError(t *testing.T) {
+	w := newTestWorker(processorFunc(func(context.Context) (bool, error) { return true, errors.New("provider failed") }))
 	if !w.ProcessOne(context.Background()) {
-		t.Fatal("ProcessOne() = false, want true")
-	}
-	if queue.completedValue == nil {
-		t.Fatal("Complete() was not called")
-	}
-	if queue.completedValue.Pair != job.Pair || !queue.completedValue.SourceTime.Equal(rateTime) {
-		t.Fatalf("Complete() value = %+v", queue.completedValue)
-	}
-	if queue.retry != nil {
-		t.Fatal("RetryOrFail() was called for successful provider response")
+		t.Fatal("claimed job reported as unclaimed")
 	}
 }
 
-func TestProcessOneSchedulesProviderRetry(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
-	queue := &queueStub{job: &domain.Job{
-		ID:         domain.NewJobID(),
-		Pair:       "EUR/MXN",
-		Status:     domain.JobStatusProcessing,
-		Attempts:   3,
-		LeaseToken: uuid.New(),
-	}}
-	w := newTestWorker(queue, providerStub{err: errors.New("provider secret details")})
-	w.now = func() time.Time { return now }
-
-	w.ProcessOne(context.Background())
-
-	if queue.retry == nil {
-		t.Fatal("RetryOrFail() was not called")
-	}
-	if queue.retry.publicError != publicProviderError {
-		t.Fatalf("public error = %q, want %q", queue.retry.publicError, publicProviderError)
-	}
-	if queue.retry.nextAttemptAt != now.Add(4*time.Second) {
-		t.Fatalf("next attempt = %s, want %s", queue.retry.nextAttemptAt, now.Add(4*time.Second))
-	}
+func TestRunDoesNotProcessCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := newTestWorker(processorFunc(func(context.Context) (bool, error) { t.Fatal("use case called after cancellation"); return false, nil }))
+	w.Run(ctx)
 }
 
-func newTestWorker(queue Queue, provider providerStub) *Worker {
-	return New(queue, provider, Config{
-		PollInterval:  time.Second,
-		LeaseDuration: 10 * time.Second,
-		RetryBase:     time.Second,
-		RetryMax:      30 * time.Second,
-		MaxAttempts:   5,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+func newTestWorker(processor JobProcessor) *Worker {
+	return New(processor, Config{PollInterval: time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }

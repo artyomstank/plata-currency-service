@@ -46,7 +46,11 @@ func run(ctx context.Context, cfg config.ServiceConfig, log *slog.Logger) error 
 	defer pool.Close()
 
 	jobs := storage.NewJobsRepo(pool)
-	uc := usecase.New(jobs, storage.NewQuotesRepo(pool), cfg.AllowedCurrencies)
+	rateProvider := provider.NewHTTPProvider(cfg.ProviderBaseURL, cfg.ProviderTimeout)
+	uc := usecase.New(jobs, storage.NewQuotesRepo(pool), storage.NewTransactionManager(pool), rateProvider, usecase.Config{
+		AllowedCurrencies: cfg.AllowedCurrencies, LeaseDuration: cfg.JobLeaseDuration,
+		MaxAttempts: cfg.MaxAttempts, RetryBase: cfg.RetryBase, RetryMax: cfg.RetryMax,
+	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           transporthttp.New(uc, log, pool.Ping, cfg.RequestTimeout),
@@ -64,13 +68,9 @@ func run(ctx context.Context, cfg config.ServiceConfig, log *slog.Logger) error 
 	workerCtx, stopWorkers := context.WithCancel(ctx)
 	defer stopWorkers()
 	var workers sync.WaitGroup
-	rateProvider := provider.NewHTTPProvider(cfg.ProviderBaseURL, cfg.ProviderTimeout)
-	workerConfig := worker.Config{
-		PollInterval: cfg.PollInterval, LeaseDuration: cfg.JobLeaseDuration,
-		RetryBase: cfg.RetryBase, RetryMax: cfg.RetryMax, MaxAttempts: cfg.MaxAttempts,
-	}
+	workerConfig := worker.Config{PollInterval: cfg.PollInterval}
 	for range cfg.WorkerCount {
-		w := worker.New(jobs, rateProvider, workerConfig, log)
+		w := worker.New(uc, workerConfig, log)
 		workers.Go(func() { w.Run(workerCtx) })
 	}
 

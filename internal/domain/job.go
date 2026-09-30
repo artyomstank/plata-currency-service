@@ -97,6 +97,18 @@ func (j *Job) Start() error {
 	return nil
 }
 
+// Reclaim begins another attempt after storage has locked an expired lease.
+// Checking lease expiry is a repository responsibility; status and attempt
+// changes remain in the domain.
+func (j *Job) Reclaim() error {
+	if err := j.requireStatus(JobStatusProcessing, JobStatusProcessing); err != nil {
+		return err
+	}
+	j.Attempts++
+	j.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
 // Complete accepts only a valid quote belonging to this job:
 // processing -> done. Persisting both entities atomically is the use case's job.
 func (j *Job) Complete(quote *Quote) error {

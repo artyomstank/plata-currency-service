@@ -1,10 +1,10 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/shopspring/decimal"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shopspring/decimal"
 
 	"currency-quotes/internal/config"
 	"currency-quotes/internal/domain"
@@ -23,8 +25,15 @@ type jobsStub struct {
 	get    func(context.Context, domain.JobID) (*domain.Job, error)
 }
 
-func (s jobsStub) CreateJob(ctx context.Context, pair, key string) (*domain.Job, bool, error) {
-	return s.create(ctx, pair, key)
+func (s jobsStub) Create(ctx context.Context, job *domain.Job) (*domain.Job, bool, error) {
+	return s.create(ctx, job.Pair, job.IdempotencyKey)
+}
+func (s jobsStub) GetByIDForUpdate(context.Context, domain.JobID) (*domain.Job, error) {
+	panic("unexpected row lock")
+}
+func (s jobsStub) LockNextAvailable(context.Context) (*domain.Job, error) { panic("unexpected claim") }
+func (s jobsStub) Save(context.Context, *domain.Job, usecase.JobUpdate) error {
+	panic("unexpected job save")
 }
 
 func (s jobsStub) GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error) {
@@ -36,6 +45,8 @@ type quotesStub struct {
 	latest func(context.Context, string) (*domain.QuoteValue, error)
 }
 
+func (s quotesStub) Save(context.Context, *domain.Quote) error { panic("unexpected quote save") }
+
 func (s quotesStub) GetByJobID(ctx context.Context, id domain.JobID) (*domain.QuoteValue, error) {
 	return s.byJob(ctx, id)
 }
@@ -45,7 +56,7 @@ func (s quotesStub) GetLatest(ctx context.Context, pair string) (*domain.QuoteVa
 }
 
 func newTestHandler(jobs jobsStub, quotes quotesStub) http.Handler {
-	return New(usecase.New(jobs, quotes, []string{"EUR", "MXN", "USD"}), slog.New(slog.NewTextHandler(io.Discard, nil)),
+	return New(newTestUseCase(jobs, quotes, []string{"EUR", "MXN", "USD"}), slog.New(slog.NewTextHandler(io.Discard, nil)),
 		func(context.Context) error { return nil }, time.Second)
 }
 
@@ -210,7 +221,7 @@ func TestHTTPErrors(t *testing.T) {
 }
 
 func TestRequestTimeoutReachesRepository(t *testing.T) {
-	uc := usecase.New(jobsStub{}, quotesStub{latest: func(ctx context.Context, _ string) (*domain.QuoteValue, error) {
+	uc := newTestUseCase(jobsStub{}, quotesStub{latest: func(ctx context.Context, _ string) (*domain.QuoteValue, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}, []string{"EUR", "MXN", "USD"})
@@ -286,7 +297,7 @@ func TestHTTPUsesConfiguredCurrencies(t *testing.T) {
 		}
 		return &domain.QuoteValue{Pair: pair, Price: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 	}}
-	handler := New(usecase.New(jobs, quotes, cfg.AllowedCurrencies),
+	handler := New(newTestUseCase(jobs, quotes, cfg.AllowedCurrencies),
 		slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, time.Second)
 	for _, tc := range []struct {
 		method, path, body string
@@ -305,4 +316,70 @@ func TestHTTPUsesConfiguredCurrencies(t *testing.T) {
 			t.Fatalf("validation error = %v", response)
 		}
 	}
+}
+
+func TestHandlerPanicReturnsJSONAndLogs500(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	uc := newTestUseCase(jobsStub{}, quotesStub{latest: func(context.Context, string) (*domain.QuoteValue, error) {
+		panic("private database panic")
+	}}, []string{"EUR", "MXN", "USD"})
+	handler := New(uc, log, func(context.Context) error { return nil }, time.Second)
+	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
+	if recorder.Code != http.StatusInternalServerError || response["code"] != "INTERNAL_ERROR" || response["requestId"] != "test-request" {
+		t.Fatalf("panic response = %d %v", recorder.Code, response)
+	}
+	if strings.Contains(recorder.Body.String(), "private database panic") {
+		t.Fatal("panic details leaked to client")
+	}
+	decoder := json.NewDecoder(&logs)
+	found := false
+	for decoder.More() {
+		var entry map[string]any
+		if err := decoder.Decode(&entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry["msg"] == "http request" {
+			found = true
+			if entry["status"] != float64(http.StatusInternalServerError) || entry["request_id"] != "test-request" {
+				t.Fatalf("incorrect panic access log: %v", entry)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("access log missing after handler panic")
+	}
+}
+
+func TestExpiredRequestCannotWriteSuccessfulResponse(t *testing.T) {
+	uc := newTestUseCase(jobsStub{}, quotesStub{latest: func(ctx context.Context, pair string) (*domain.QuoteValue, error) {
+		<-ctx.Done()
+		return &domain.QuoteValue{Pair: pair, Price: decimal.NewFromInt(1), CreatedAt: time.Now()}, nil
+	}}, []string{"EUR", "MXN", "USD"})
+	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, time.Millisecond)
+	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
+	if recorder.Code != http.StatusGatewayTimeout || response["code"] != "GATEWAY_TIMEOUT" {
+		t.Fatalf("expired request response = %d %v", recorder.Code, response)
+	}
+}
+
+func TestOversizedTrailingBodyDoesNotCreateJob(t *testing.T) {
+	handler := newTestHandler(jobsStub{create: func(context.Context, string, string) (*domain.Job, bool, error) {
+		t.Fatal("oversized request reached repository")
+		return nil, false, nil
+	}}, quotesStub{})
+	body := `{"pair":"EUR/MXN"}` + strings.Repeat(" ", maxRequestBody)
+	recorder, response := call(t, handler, http.MethodPost, "/v1/quote-updates", body)
+	if recorder.Code != http.StatusRequestEntityTooLarge || response["code"] != "INVALID_ARGUMENT" {
+		t.Fatalf("oversized trailing body response = %d %v", recorder.Code, response)
+	}
+}
+
+type testTransactionManager struct{}
+
+func (testTransactionManager) WithinTransaction(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+func newTestUseCase(jobs jobsStub, quotes quotesStub, currencies []string) *usecase.QuotesUseCase {
+	return usecase.New(jobs, quotes, testTransactionManager{}, nil, usecase.Config{AllowedCurrencies: currencies})
 }
