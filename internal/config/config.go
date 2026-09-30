@@ -7,10 +7,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"currency-quotes/internal/domain"
 )
 
 type ServiceConfig struct {
-	GRPCAddr                  string
+	HTTPAddr                  string
+	AllowedCurrencies         []string
+	RequestTimeout            time.Duration
+	ReadTimeout               time.Duration
+	WriteTimeout              time.Duration
+	IdleTimeout               time.Duration
 	DatabaseDSN               string
 	DatabaseMaxConns          int32
 	DatabaseMinConns          int32
@@ -26,19 +33,13 @@ type ServiceConfig struct {
 	ShutdownTimeout           time.Duration
 }
 
-type GatewayConfig struct {
-	HTTPAddr        string
-	BackendAddr     string
-	BackendTimeout  time.Duration
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
-	ShutdownTimeout time.Duration
-}
-
 func LoadServiceConfig() (ServiceConfig, error) {
 	cfg := ServiceConfig{
-		GRPCAddr:                  env("GRPC_ADDR", ":9090"),
+		HTTPAddr:                  env("HTTP_ADDR", ":8080"),
+		RequestTimeout:            3 * time.Second,
+		ReadTimeout:               5 * time.Second,
+		WriteTimeout:              10 * time.Second,
+		IdleTimeout:               60 * time.Second,
 		DatabaseDSN:               env("DATABASE_DSN", ""),
 		DatabaseMaxConns:          10,
 		DatabaseMinConns:          1,
@@ -55,6 +56,22 @@ func LoadServiceConfig() (ServiceConfig, error) {
 	}
 
 	var err error
+	cfg.AllowedCurrencies, err = domain.NormalizeCurrencies(strings.Split(env("ALLOWED_CURRENCIES", "EUR,MXN,USD"), ","))
+	if err != nil {
+		return ServiceConfig{}, fmt.Errorf("ALLOWED_CURRENCIES: %w", err)
+	}
+	if cfg.RequestTimeout, err = durationEnv("HTTP_REQUEST_TIMEOUT", cfg.RequestTimeout); err != nil {
+		return ServiceConfig{}, err
+	}
+	if cfg.ReadTimeout, err = durationEnv("HTTP_READ_TIMEOUT", cfg.ReadTimeout); err != nil {
+		return ServiceConfig{}, err
+	}
+	if cfg.WriteTimeout, err = durationEnv("HTTP_WRITE_TIMEOUT", cfg.WriteTimeout); err != nil {
+		return ServiceConfig{}, err
+	}
+	if cfg.IdleTimeout, err = durationEnv("HTTP_IDLE_TIMEOUT", cfg.IdleTimeout); err != nil {
+		return ServiceConfig{}, err
+	}
 	if cfg.DatabaseMaxConns, err = int32Env("DATABASE_MAX_CONNS", cfg.DatabaseMaxConns); err != nil {
 		return ServiceConfig{}, err
 	}
@@ -89,8 +106,8 @@ func LoadServiceConfig() (ServiceConfig, error) {
 		return ServiceConfig{}, err
 	}
 
-	if cfg.GRPCAddr == "" {
-		return ServiceConfig{}, fmt.Errorf("GRPC_ADDR must not be empty")
+	if cfg.HTTPAddr == "" {
+		return ServiceConfig{}, fmt.Errorf("HTTP_ADDR must not be empty")
 	}
 	if cfg.DatabaseDSN == "" {
 		return ServiceConfig{}, fmt.Errorf("DATABASE_DSN must not be empty")
@@ -112,42 +129,6 @@ func LoadServiceConfig() (ServiceConfig, error) {
 	}
 	if err := validateHTTPURL(cfg.ProviderBaseURL); err != nil {
 		return ServiceConfig{}, fmt.Errorf("PROVIDER_BASE_URL: %w", err)
-	}
-	return cfg, nil
-}
-
-func LoadGatewayConfig() (GatewayConfig, error) {
-	cfg := GatewayConfig{
-		HTTPAddr:        env("HTTP_ADDR", ":8080"),
-		BackendAddr:     env("BACKEND_ADDR", "localhost:9090"),
-		BackendTimeout:  3 * time.Second,
-		ReadTimeout:     5 * time.Second,
-		WriteTimeout:    10 * time.Second,
-		IdleTimeout:     60 * time.Second,
-		ShutdownTimeout: 10 * time.Second,
-	}
-
-	var err error
-	if cfg.BackendTimeout, err = durationEnv("BACKEND_TIMEOUT", cfg.BackendTimeout); err != nil {
-		return GatewayConfig{}, err
-	}
-	if cfg.ReadTimeout, err = durationEnv("HTTP_READ_TIMEOUT", cfg.ReadTimeout); err != nil {
-		return GatewayConfig{}, err
-	}
-	if cfg.WriteTimeout, err = durationEnv("HTTP_WRITE_TIMEOUT", cfg.WriteTimeout); err != nil {
-		return GatewayConfig{}, err
-	}
-	if cfg.IdleTimeout, err = durationEnv("HTTP_IDLE_TIMEOUT", cfg.IdleTimeout); err != nil {
-		return GatewayConfig{}, err
-	}
-	if cfg.ShutdownTimeout, err = durationEnv("SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
-		return GatewayConfig{}, err
-	}
-	if cfg.HTTPAddr == "" {
-		return GatewayConfig{}, fmt.Errorf("HTTP_ADDR must not be empty")
-	}
-	if cfg.BackendAddr == "" {
-		return GatewayConfig{}, fmt.Errorf("BACKEND_ADDR must not be empty")
 	}
 	return cfg, nil
 }

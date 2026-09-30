@@ -34,9 +34,10 @@ func (r *JobsRepo) CreateJob(ctx context.Context, pair, idempotencyKey string) (
 	`, pair, idempotencyKey)
 
 	var j domain.Job
+	var jobID uuid.UUID
 	var created bool
 	if err := row.Scan(
-		&j.ID,
+		&jobID,
 		&j.Pair,
 		&j.Status,
 		&j.ErrorMessage,
@@ -47,6 +48,7 @@ func (r *JobsRepo) CreateJob(ctx context.Context, pair, idempotencyKey string) (
 	); err != nil {
 		return nil, false, fmt.Errorf("create quote job: %w", err)
 	}
+	j.ID = domain.JobID(jobID)
 	return &j, created, nil
 }
 
@@ -74,19 +76,21 @@ func (r *JobsRepo) ClaimNextPending(ctx context.Context, leaseDuration time.Dura
 	`, leaseSeconds)
 
 	var j domain.Job
-	err := row.Scan(&j.ID, &j.Pair, &j.Status, &j.Attempts, &j.LeaseToken, &j.CreatedAt, &j.UpdatedAt)
+	var jobID uuid.UUID
+	err := row.Scan(&jobID, &j.Pair, &j.Status, &j.Attempts, &j.LeaseToken, &j.CreatedAt, &j.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	j.ID = domain.JobID(jobID)
 	return &j, nil
 }
 
 // Complete stores the quote and marks its job done in one transaction. The
 // lease token prevents a stale worker from completing a reclaimed job.
-func (r *JobsRepo) Complete(ctx context.Context, id, leaseToken uuid.UUID, value domain.QuoteValue) error {
+func (r *JobsRepo) Complete(ctx context.Context, id domain.JobID, leaseToken uuid.UUID, value domain.QuoteValue) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin completion transaction: %w", err)
@@ -98,7 +102,7 @@ func (r *JobsRepo) Complete(ctx context.Context, id, leaseToken uuid.UUID, value
 		SET status = 'done', error_message = NULL, lease_token = NULL,
 		    lease_until = NULL, updated_at = now()
 		WHERE id = $1 AND status = 'processing' AND lease_token = $2
-	`, id, leaseToken)
+	`, uuid.UUID(id), leaseToken)
 	if err != nil {
 		return fmt.Errorf("mark quote job done: %w", err)
 	}
@@ -109,7 +113,7 @@ func (r *JobsRepo) Complete(ctx context.Context, id, leaseToken uuid.UUID, value
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO quote_values (job_id, pair, price, rate_time)
 		VALUES ($1, $2, $3, $4)
-	`, id, value.Pair, value.Price.String(), value.SourceTime); err != nil {
+	`, uuid.UUID(id), value.Pair, value.Price.String(), value.SourceTime); err != nil {
 		return fmt.Errorf("insert quote value: %w", err)
 	}
 
@@ -123,7 +127,8 @@ func (r *JobsRepo) Complete(ctx context.Context, id, leaseToken uuid.UUID, value
 // until maxAttempts is reached; nextAttemptAt implements persistent backoff.
 func (r *JobsRepo) RetryOrFail(
 	ctx context.Context,
-	id, leaseToken uuid.UUID,
+	id domain.JobID,
+	leaseToken uuid.UUID,
 	attempts, maxAttempts int,
 	nextAttemptAt time.Time,
 	publicError string,
@@ -138,7 +143,7 @@ func (r *JobsRepo) RetryOrFail(
 		SET status = $3, error_message = $4, next_attempt_at = $5,
 		    lease_token = NULL, lease_until = NULL, updated_at = now()
 		WHERE id = $1 AND status = 'processing' AND lease_token = $2
-	`, id, leaseToken, status, publicError, nextAttemptAt)
+	`, uuid.UUID(id), leaseToken, status, publicError, nextAttemptAt)
 	if err != nil {
 		return fmt.Errorf("release quote job: %w", err)
 	}
@@ -148,19 +153,21 @@ func (r *JobsRepo) RetryOrFail(
 	return nil
 }
 
-func (r *JobsRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.Job, error) {
+func (r *JobsRepo) GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, pair, status, coalesce(error_message, ''), attempts, created_at, updated_at
 		FROM quote_jobs WHERE id = $1
-	`, id)
+	`, uuid.UUID(id))
 
 	var j domain.Job
-	err := row.Scan(&j.ID, &j.Pair, &j.Status, &j.ErrorMessage, &j.Attempts, &j.CreatedAt, &j.UpdatedAt)
+	var jobID uuid.UUID
+	err := row.Scan(&jobID, &j.Pair, &j.Status, &j.ErrorMessage, &j.Attempts, &j.CreatedAt, &j.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	j.ID = domain.JobID(jobID)
 	return &j, nil
 }

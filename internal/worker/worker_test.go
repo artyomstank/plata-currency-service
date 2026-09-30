@@ -31,14 +31,14 @@ func (q *queueStub) ClaimNextPending(context.Context, time.Duration) (*domain.Jo
 	return q.job, nil
 }
 
-func (q *queueStub) Complete(_ context.Context, _, _ uuid.UUID, value domain.QuoteValue) error {
+func (q *queueStub) Complete(_ context.Context, _ domain.JobID, _ uuid.UUID, value domain.QuoteValue) error {
 	q.completedValue = &value
 	return nil
 }
 
 func (q *queueStub) RetryOrFail(
 	_ context.Context,
-	_, _ uuid.UUID,
+	_ domain.JobID, _ uuid.UUID,
 	attempts, maxAttempts int,
 	nextAttemptAt time.Time,
 	publicError string,
@@ -66,7 +66,7 @@ func TestProcessOneCompletesJob(t *testing.T) {
 	t.Parallel()
 
 	job := &domain.Job{
-		ID:         uuid.New(),
+		ID:         domain.NewJobID(),
 		Pair:       "EUR/MXN",
 		Status:     domain.JobStatusProcessing,
 		Attempts:   1,
@@ -98,7 +98,7 @@ func TestProcessOneSchedulesProviderRetry(t *testing.T) {
 
 	now := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
 	queue := &queueStub{job: &domain.Job{
-		ID:         uuid.New(),
+		ID:         domain.NewJobID(),
 		Pair:       "EUR/MXN",
 		Status:     domain.JobStatusProcessing,
 		Attempts:   3,

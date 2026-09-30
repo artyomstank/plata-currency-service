@@ -18,37 +18,29 @@ services:
   migrate:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.migrate
+      dockerfile: deploy/Dockerfile
+      target: migrate
     environment:
       DATABASE_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
 
-  service:
+  currency-service:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.service
+      dockerfile: deploy/Dockerfile
+      target: currency-service
     environment:
       DATABASE_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
-      GRPC_ADDR: ":9090"
+      HTTP_ADDR: ":8080"
+      ALLOWED_CURRENCIES: ${ALLOWED_CURRENCIES-EUR,MXN,USD}
       PROVIDER_BASE_URL: ${PROVIDER_BASE_URL:-https://api.frankfurter.app}
     depends_on:
       migrate:
         condition: service_completed_successfully
-
-  gateway:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.gateway
-    environment:
-      HTTP_ADDR: ":8080"
-      BACKEND_ADDR: "service:9090"
     ports:
       - "${HTTP_PORT:-8080}:8080"
-    depends_on:
-      service:
-        condition: service_started
 
 volumes:
   pgdata:

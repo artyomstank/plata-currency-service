@@ -1,20 +1,18 @@
 // Package usecase содержит бизнес-логику сервиса котировок, не зависящую от
-// транспорта (gRPC) — это позволяет тестировать её unit-тестами без сети и БД.
+// HTTP-транспорта — это позволяет тестировать её unit-тестами без сети и БД.
 package usecase
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
-
-	"github.com/google/uuid"
+	"slices"
 
 	"currency-quotes/internal/domain"
 )
 
 var (
-	ErrInvalidPair         = errors.New("invalid currency pair")
+	ErrInvalidPair         = domain.ErrInvalidPair
 	ErrInvalidIdempotency  = errors.New("invalid idempotency key")
 	ErrIdempotencyConflict = errors.New("idempotency key is already used for another pair")
 	ErrJobNotFound         = errors.New("quote update not found")
@@ -22,48 +20,23 @@ var (
 )
 
 type QuotesUseCase struct {
-	jobs   JobsRepository
-	quotes QuotesRepository
+	jobs       JobsRepository
+	quotes     QuotesRepository
+	currencies []string
 }
 
 type JobsRepository interface {
 	CreateJob(ctx context.Context, pair, idempotencyKey string) (*domain.Job, bool, error)
-	GetByID(ctx context.Context, id uuid.UUID) (*domain.Job, error)
+	GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error)
 }
 
 type QuotesRepository interface {
-	GetByJobID(ctx context.Context, jobID uuid.UUID) (*domain.QuoteValue, error)
+	GetByJobID(ctx context.Context, jobID domain.JobID) (*domain.QuoteValue, error)
 	GetLatest(ctx context.Context, pair string) (*domain.QuoteValue, error)
 }
 
-func New(jobs JobsRepository, quotes QuotesRepository) *QuotesUseCase {
-	return &QuotesUseCase{jobs: jobs, quotes: quotes}
-}
-
-// NormalizePair приводит код пары к каноническому виду "USD/MXN" и проверяет,
-// что обе валюты поддерживаются и различны.
-func NormalizePair(raw string) (string, error) {
-	parts := strings.Split(strings.ToUpper(strings.TrimSpace(raw)), "/")
-	if len(parts) != 2 {
-		return "", fmt.Errorf("%w: expected BASE/QUOTE", ErrInvalidPair)
-	}
-	base, quote := parts[0], parts[1]
-	if !isAllowedCurrency(base) || !isAllowedCurrency(quote) {
-		return "", fmt.Errorf("%w: supported currencies are EUR, MXN and USD", ErrInvalidPair)
-	}
-	if base == quote {
-		return "", fmt.Errorf("%w: base and quote currency must differ", ErrInvalidPair)
-	}
-	return base + "/" + quote, nil
-}
-
-func isAllowedCurrency(code string) bool {
-	switch code {
-	case "EUR", "MXN", "USD":
-		return true
-	default:
-		return false
-	}
+func New(jobs JobsRepository, quotes QuotesRepository, allowedCurrencies []string) *QuotesUseCase {
+	return &QuotesUseCase{jobs: jobs, quotes: quotes, currencies: slices.Clone(allowedCurrencies)}
 }
 
 type RequestUpdateResult struct {
@@ -72,7 +45,7 @@ type RequestUpdateResult struct {
 }
 
 func (uc *QuotesUseCase) RequestUpdate(ctx context.Context, rawPair, idempotencyKey string) (*RequestUpdateResult, error) {
-	pair, err := NormalizePair(rawPair)
+	pair, err := domain.NormalizePair(rawPair, uc.currencies)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +68,7 @@ type JobResult struct {
 	Value *domain.QuoteValue // nil, если задача ещё не завершена успехом
 }
 
-func (uc *QuotesUseCase) GetJobResult(ctx context.Context, id uuid.UUID) (*JobResult, error) {
+func (uc *QuotesUseCase) GetJobResult(ctx context.Context, id domain.JobID) (*JobResult, error) {
 	job, err := uc.jobs.GetByID(ctx, id)
 	if errors.Is(err, domain.ErrNotFound) {
 		return nil, ErrJobNotFound
@@ -116,7 +89,7 @@ func (uc *QuotesUseCase) GetJobResult(ctx context.Context, id uuid.UUID) (*JobRe
 }
 
 func (uc *QuotesUseCase) GetLatest(ctx context.Context, rawPair string) (*domain.QuoteValue, error) {
-	pair, err := NormalizePair(rawPair)
+	pair, err := domain.NormalizePair(rawPair, uc.currencies)
 	if err != nil {
 		return nil, err
 	}

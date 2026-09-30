@@ -18,10 +18,11 @@ const publicProviderError = "quote provider is temporarily unavailable"
 
 type Queue interface {
 	ClaimNextPending(ctx context.Context, leaseDuration time.Duration) (*domain.Job, error)
-	Complete(ctx context.Context, id, leaseToken uuid.UUID, value domain.QuoteValue) error
+	Complete(ctx context.Context, id domain.JobID, leaseToken uuid.UUID, value domain.QuoteValue) error
 	RetryOrFail(
 		ctx context.Context,
-		id, leaseToken uuid.UUID,
+		id domain.JobID,
+		leaseToken uuid.UUID,
 		attempts, maxAttempts int,
 		nextAttemptAt time.Time,
 		publicError string,
