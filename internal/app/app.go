@@ -9,7 +9,7 @@ import (
 
 	"currency-quotes/internal/config"
 	"currency-quotes/internal/provider/frankfurter"
-	"currency-quotes/internal/storage"
+	"currency-quotes/internal/repo"
 	transporthttp "currency-quotes/internal/transport/http"
 	"currency-quotes/internal/usecase"
 	"currency-quotes/internal/worker"
@@ -38,7 +38,7 @@ func Run(ctx context.Context, log *slog.Logger) error {
 }
 
 func newApplication(ctx context.Context, cfg config.ServiceConfig, log *slog.Logger) (*application, error) {
-	pool, err := storage.NewPool(ctx, storage.PoolConfig{
+	pool, err := repo.NewPool(ctx, repo.PoolConfig{
 		DSN: cfg.DatabaseDSN, MaxConns: cfg.DatabaseMaxConns,
 		MinConns: cfg.DatabaseMinConns, HealthCheckPeriod: cfg.DatabaseHealthCheckPeriod,
 	})
@@ -53,8 +53,8 @@ func newApplication(ctx context.Context, cfg config.ServiceConfig, log *slog.Log
 		return nil, err
 	}
 	source := frankfurter.NewAdapter(sourceClient)
-	jobs, quotes := storage.NewJobsRepo(pool), storage.NewQuotesRepo(pool)
-	tx := storage.NewTransactionManager(pool)
+	jobs, quotes := repo.NewJobsRepo(pool), repo.NewQuotesRepo(pool)
+	tx := repo.NewTransactionManager(pool)
 	claim := usecase.NewClaimPending(jobs, tx, cfg.JobLeaseDuration)
 	complete := usecase.NewCompleteJob(jobs, quotes, tx)
 	retry := usecase.NewRetryJob(jobs, tx, usecase.RetryConfig{MaxAttempts: cfg.MaxAttempts, RetryBase: cfg.RetryBase, RetryMax: cfg.RetryMax})

@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"currency-quotes/internal/config"
-	"currency-quotes/internal/storage"
+	"currency-quotes/internal/repo"
 	"currency-quotes/migrations"
 )
 
@@ -30,7 +30,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := storage.NewPool(ctx, storage.PoolConfig{
+	pool, err := repo.NewPool(ctx, repo.PoolConfig{
 		DSN:               cfg.DatabaseDSN,
 		MaxConns:          1,
 		MinConns:          1,
