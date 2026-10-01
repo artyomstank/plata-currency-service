@@ -64,7 +64,6 @@ func requestLoggerMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 				if status == 0 {
 					status = http.StatusOK
 					if !completed {
-						// The outer recoverer will render 500 after stack unwinding.
 						status = http.StatusInternalServerError
 					}
 				}

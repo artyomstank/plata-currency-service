@@ -15,7 +15,6 @@ type PoolConfig struct {
 	HealthCheckPeriod time.Duration
 }
 
-// NewPool creates and verifies a PostgreSQL connection pool.
 func NewPool(ctx context.Context, poolConfig PoolConfig) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(poolConfig.DSN)
 	if err != nil {

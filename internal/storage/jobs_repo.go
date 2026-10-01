@@ -22,7 +22,6 @@ func NewJobsRepo(pool *pgxpool.Pool) *JobsRepo {
 	return &JobsRepo{pool: pool}
 }
 
-// jobModel is the PostgreSQL representation; the domain never sees SQL types.
 type jobModel struct {
 	ID             uuid.UUID
 	Pair           string
@@ -71,8 +70,6 @@ func scanJob(row pgx.Row) (*domain.Job, error) {
 	return m.toDomain(), nil
 }
 
-// Create persists the domain constructor's identity and timestamps. Conflict
-// handling remains atomic even with concurrent requests using the same key.
 func (r *JobsRepo) Create(ctx context.Context, job *domain.Job) (*domain.Job, bool, error) {
 	tx, err := requireTransaction(ctx)
 	if err != nil {
@@ -108,8 +105,6 @@ func (r *JobsRepo) GetByIDForUpdate(ctx context.Context, id domain.JobID) (*doma
 	return scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM quote_jobs WHERE id = $1 FOR UPDATE`, uuid.UUID(id)))
 }
 
-// LockNextAvailable coordinates concurrent workers; business status and attempt
-// changes are performed by the domain in the use case, then persisted by Save.
 func (r *JobsRepo) LockNextAvailable(ctx context.Context) (*domain.Job, error) {
 	tx, err := requireTransaction(ctx)
 	if err != nil {
@@ -129,8 +124,6 @@ func (r *JobsRepo) LockNextAvailable(ctx context.Context) (*domain.Job, error) {
 	return job, err
 }
 
-// Save uses the old lease token as a compare-and-set guard. Domain transitions
-// clear the token; queue coordination data is persisted in the same update.
 func (r *JobsRepo) Save(ctx context.Context, job *domain.Job, update usecase.JobUpdate) error {
 	tx, err := requireTransaction(ctx)
 	if err != nil {

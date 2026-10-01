@@ -34,8 +34,6 @@ func (m *TransactionManager) WithinTransaction(ctx context.Context, fn func(cont
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() {
-		// Request cancellation must not prevent returning the connection
-		// after rolling back. This defer also runs during panic unwinding.
 		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if rollbackErr := tx.Rollback(rollbackCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {

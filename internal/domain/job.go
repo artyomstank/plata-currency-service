@@ -1,5 +1,3 @@
-// Package domain contains quote entities and their business rules.
-// It has no dependencies on HTTP, PostgreSQL or transaction management.
 package domain
 
 import (
@@ -22,7 +20,6 @@ var (
 
 const maxIdempotencyKeyLength = 128
 
-// JobID identifies a job independently of quote identities.
 type JobID uuid.UUID
 
 func NewJobID() JobID {
@@ -53,9 +50,6 @@ const (
 	JobStatusFailed     JobStatus = "failed"
 )
 
-// Job is a request to obtain a quote. Its fields remain public;
-// business transitions are expressed through the lifecycle methods below.
-// LeaseToken is storage coordination metadata, not a business transition guard.
 type Job struct {
 	ID             JobID
 	Pair           string
@@ -68,8 +62,6 @@ type Job struct {
 	UpdatedAt      time.Time
 }
 
-// NewJob creates a pending job. An empty idempotency key is allowed;
-// a non-empty key is preserved verbatim because it identifies the request.
 func NewJob(rawPair, idempotencyKey string, allowedCurrencies []string) (*Job, error) {
 	pair, err := NormalizePair(rawPair, allowedCurrencies)
 	if err != nil {
@@ -85,8 +77,6 @@ func NewJob(rawPair, idempotencyKey string, allowedCurrencies []string) (*Job, e
 	}, nil
 }
 
-// Start begins one attempt: pending -> processing.
-// Reclaiming an expired database lease is a separate storage operation.
 func (j *Job) Start() error {
 	if err := j.requireStatus(JobStatusPending, JobStatusProcessing); err != nil {
 		return err
@@ -97,9 +87,6 @@ func (j *Job) Start() error {
 	return nil
 }
 
-// Reclaim begins another attempt after storage has locked an expired lease.
-// Checking lease expiry is a repository responsibility; status and attempt
-// changes remain in the domain.
 func (j *Job) Reclaim() error {
 	if err := j.requireStatus(JobStatusProcessing, JobStatusProcessing); err != nil {
 		return err
@@ -109,8 +96,6 @@ func (j *Job) Reclaim() error {
 	return nil
 }
 
-// Complete accepts only a valid quote belonging to this job:
-// processing -> done. Persisting both entities atomically is the use case's job.
 func (j *Job) Complete(quote *Quote) error {
 	if err := j.requireStatus(JobStatusProcessing, JobStatusDone); err != nil {
 		return err
@@ -128,8 +113,6 @@ func (j *Job) Complete(quote *Quote) error {
 	return nil
 }
 
-// RetryOrFail releases a failed attempt. It returns to pending while attempts
-// remain, otherwise it enters failed. Scheduling/backoff belongs to the worker.
 func (j *Job) RetryOrFail(maxAttempts int, publicMessage string) error {
 	if err := j.requireStatus(JobStatusProcessing, JobStatusPending); err != nil {
 		return err
@@ -151,7 +134,6 @@ func (j *Job) RetryOrFail(maxAttempts int, publicMessage string) error {
 	return nil
 }
 
-// Fail terminates an attempt with a permanent error: processing -> failed.
 func (j *Job) Fail(publicMessage string) error {
 	if err := j.requireStatus(JobStatusProcessing, JobStatusFailed); err != nil {
 		return err

@@ -22,7 +22,6 @@ var (
 
 type handlerFunc func(http.ResponseWriter, *http.Request) error
 
-// ErrorHandler renders application and transport errors in the public format.
 type ErrorHandler struct {
 	log *slog.Logger
 }
@@ -58,15 +57,12 @@ func (h *ErrorHandler) Handle(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, errMethodNotAllowed):
 		status, code, message = http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed"
 	case errors.Is(err, context.DeadlineExceeded):
-		// Retain the existing public timeout code for HTTP clients.
 		status, code, message = http.StatusGatewayTimeout, "GATEWAY_TIMEOUT", "request timed out"
 	case errors.Is(err, errPanic):
-		// The recoverer already logged the panic and stack trace.
 	default:
 		h.log.ErrorContext(r.Context(), "HTTP request failed", "request_id", responseRequestID(w, r), "err", err)
 	}
 	if recorder, ok := w.(chimiddleware.WrapResponseWriter); ok && recorder.Status() != 0 {
-		// A committed response cannot be replaced with a second JSON document.
 		return
 	}
 	if err := writeJSON(w, r, status, errorResponse{Code: code, Message: message, RequestID: responseRequestID(w, r)}); err != nil {
@@ -94,6 +90,5 @@ func responseRequestID(w http.ResponseWriter, r *http.Request) string {
 	if id := requestIDFromContext(r.Context()); id != "" {
 		return id
 	}
-	// The outer recoverer receives the original request, before WithContext.
 	return w.Header().Get("X-Request-ID")
 }

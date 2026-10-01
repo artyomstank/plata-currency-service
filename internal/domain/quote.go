@@ -18,7 +18,6 @@ var (
 	ErrInvalidQuoteID    = errors.New("invalid quote ID")
 )
 
-// QuoteID identifies a quote independently of job identities.
 type QuoteID uuid.UUID
 
 func NewQuoteID() QuoteID {
@@ -40,9 +39,6 @@ func (id QuoteID) String() string {
 	return uuid.UUID(id).String()
 }
 
-// Quote is the result of one job. A price is stored as decimal, not float.
-// SourceTime is the provider's rate date; CreatedAt is the result creation time.
-// Its fields remain public; construction and validation enforce domain rules.
 type Quote struct {
 	ID         QuoteID
 	JobID      JobID
@@ -52,8 +48,6 @@ type Quote struct {
 	CreatedAt  time.Time
 }
 
-// QuoteValue keeps existing repository, worker and transport contracts working.
-// New domain code uses the shorter Quote name.
 type QuoteValue = Quote
 
 func NewQuote(jobID JobID, rawPair string, price decimal.Decimal, sourceTime time.Time, allowedCurrencies []string) (*Quote, error) {
@@ -71,9 +65,6 @@ func NewQuote(jobID JobID, rawPair string, price decimal.Decimal, sourceTime tim
 	return quote, nil
 }
 
-// Validate also guards completion against a quote assembled by legacy code
-// without using NewQuote. It checks intrinsic rules, not the current admission
-// list: changing configuration must not invalidate an existing result.
 func (q *Quote) Validate() error {
 	if q == nil {
 		return fmt.Errorf("%w: quote must not be nil", ErrInvalidQuote)
@@ -97,8 +88,6 @@ func (q *Quote) Validate() error {
 	return nil
 }
 
-// NormalizeCurrencies validates and normalizes the configured admission list.
-// It returns its own slice; callers cannot change it by mutating the input.
 func NormalizeCurrencies(codes []string) ([]string, error) {
 	currencies := make([]string, 0, len(codes))
 	for _, raw := range codes {
@@ -116,8 +105,6 @@ func NormalizeCurrencies(codes []string) ([]string, error) {
 	return currencies, nil
 }
 
-// NormalizePair applies the configured admission list to a currency pair.
-// The domain receives this list explicitly and never reads environment variables.
 func NormalizePair(raw string, allowedCurrencies []string) (string, error) {
 	pair, err := normalizePair(raw)
 	if err != nil {
@@ -130,7 +117,6 @@ func NormalizePair(raw string, allowedCurrencies []string) (string, error) {
 	return pair, nil
 }
 
-// Stored results remain valid if the configured admission list later changes.
 func normalizePair(raw string) (string, error) {
 	parts := strings.Split(strings.ToUpper(strings.TrimSpace(raw)), "/")
 	if len(parts) != 2 {

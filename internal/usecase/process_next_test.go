@@ -22,8 +22,6 @@ func (f rateProviderFunc) FetchRate(ctx context.Context, base, quote string) (de
 
 type testTransactionKey struct{}
 
-// fixture stages both repositories in the same fake transaction. Rejected
-// operations cannot publish either the quote or the modified job.
 type jobFixture struct {
 	job                     *domain.Job
 	quote                   *domain.Quote
@@ -33,7 +31,11 @@ type jobFixture struct {
 	commits, rollbacks      int
 	quoteError, commitError error
 	lastUpdate              JobUpdate
-	uc                      *QuotesUseCase
+	claim                   *ClaimPending
+	complete                *CompleteJob
+	retry                   *RetryJob
+	process                 *ProcessNext
+	getResult               *GetJobResult
 }
 
 func cloneJob(job *domain.Job) *domain.Job {
@@ -116,7 +118,11 @@ func newJobFixture(t *testing.T) *jobFixture {
 			return f.stagedQuote, nil
 		},
 	}
-	f.uc = New(jobs, quotes, tx, nil, Config{AllowedCurrencies: []string{"EUR", "MXN", "USD"}, LeaseDuration: 30 * time.Second, MaxAttempts: 5, RetryBase: time.Second, RetryMax: 30 * time.Second})
+	f.claim = NewClaimPending(jobs, tx, 30*time.Second)
+	f.complete = NewCompleteJob(jobs, quotes, tx)
+	f.retry = NewRetryJob(jobs, tx, RetryConfig{MaxAttempts: 5, RetryBase: time.Second, RetryMax: 30 * time.Second})
+	f.process = NewProcessNext(f.claim, f.complete, f.retry, nil)
+	f.getResult = NewGetJobResult(jobs, quotes, tx)
 	return f
 }
 
@@ -138,8 +144,9 @@ func TestClaimPendingStartsAttemptAndReplacesExpiredLease(t *testing.T) {
 			}
 			oldToken := f.job.LeaseToken
 			now := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-			f.uc.now = func() time.Time { return now }
-			claimed, err := f.uc.ClaimPending(context.Background())
+			f.claim.now = func() time.Time { return now }
+			f.retry.now = f.claim.now
+			claimed, err := f.claim.Execute(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,7 +163,7 @@ func TestClaimPendingStartsAttemptAndReplacesExpiredLease(t *testing.T) {
 func TestClaimPendingReturnsNilForEmptyQueue(t *testing.T) {
 	f := newJobFixture(t)
 	f.job = nil
-	claimed, err := f.uc.ClaimPending(context.Background())
+	claimed, err := f.claim.Execute(context.Background())
 	if claimed != nil || err != nil {
 		t.Fatalf("claim=%v err=%v", claimed, err)
 	}
@@ -164,13 +171,14 @@ func TestClaimPendingReturnsNilForEmptyQueue(t *testing.T) {
 
 func TestCompleteJobPersistsBothEntitiesAndReadsResult(t *testing.T) {
 	f := newJobFixture(t)
-	job, err := f.uc.ClaimPending(context.Background())
+	job, err := f.claim.Execute(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Admission changes must not invalidate an already accepted job.
-	f.uc.config.AllowedCurrencies = []string{"CHF", "JPY"}
-	if err := f.uc.CompleteJob(context.Background(), completionInput(job)); err != nil {
+	if _, err := NewGetLatest(quotesStub{}, []string{"CHF", "JPY"}).Execute(context.Background(), GetLatestQuoteInput{Pair: job.Pair}); !errors.Is(err, domain.ErrInvalidPair) {
+		t.Fatalf("admission list was not changed: %v", err)
+	}
+	if err := f.complete.Execute(context.Background(), completionInput(job)); err != nil {
 		t.Fatal(err)
 	}
 	if f.job.Status != domain.JobStatusDone || f.job.LeaseToken != uuid.Nil || f.quote == nil || f.quote.JobID != job.ID {
@@ -182,7 +190,7 @@ func TestCompleteJobPersistsBothEntitiesAndReadsResult(t *testing.T) {
 	if f.quote.Price.String() != "19.123456789012345678" {
 		t.Fatal("decimal precision lost")
 	}
-	result, err := f.uc.GetJobResult(context.Background(), GetQuoteUpdateInput{job.ID})
+	result, err := f.getResult.Execute(context.Background(), GetQuoteUpdateInput{job.ID})
 	if err != nil || result.Value != f.quote {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -192,7 +200,7 @@ func TestCompleteJobRollsBackBothRepositories(t *testing.T) {
 	for _, failCommit := range []bool{false, true} {
 		t.Run(map[bool]string{false: "quote save", true: "commit"}[failCommit], func(t *testing.T) {
 			f := newJobFixture(t)
-			job, err := f.uc.ClaimPending(context.Background())
+			job, err := f.claim.Execute(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -202,7 +210,7 @@ func TestCompleteJobRollsBackBothRepositories(t *testing.T) {
 			} else {
 				f.quoteError = failure
 			}
-			err = f.uc.CompleteJob(context.Background(), completionInput(job))
+			err = f.complete.Execute(context.Background(), completionInput(job))
 			if !errors.Is(err, failure) {
 				t.Fatalf("err=%v", err)
 			}
@@ -215,21 +223,20 @@ func TestCompleteJobRollsBackBothRepositories(t *testing.T) {
 
 func TestStaleWorkerCannotCompleteOrReleaseReclaimedJob(t *testing.T) {
 	f := newJobFixture(t)
-	old, err := f.uc.ClaimPending(context.Background())
+	old, err := f.claim.Execute(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The repository selected the old processing row because its lease expired.
-	current, err := f.uc.ClaimPending(context.Background())
+	current, err := f.claim.Execute(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, release := range []bool{false, true} {
 		var err error
 		if release {
-			err = f.uc.RetryJob(context.Background(), RetryJobInput{old.ID, old.LeaseToken})
+			err = f.retry.Execute(context.Background(), RetryJobInput{old.ID, old.LeaseToken})
 		} else {
-			err = f.uc.CompleteJob(context.Background(), completionInput(old))
+			err = f.complete.Execute(context.Background(), completionInput(old))
 		}
 		if !errors.Is(err, domain.ErrClaimLost) {
 			t.Fatalf("stale operation err=%v", err)
@@ -242,13 +249,13 @@ func TestStaleWorkerCannotCompleteOrReleaseReclaimedJob(t *testing.T) {
 
 func TestCompleteJobRejectsInvalidQuoteBeforeSaving(t *testing.T) {
 	f := newJobFixture(t)
-	job, err := f.uc.ClaimPending(context.Background())
+	job, err := f.claim.Execute(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	input := completionInput(job)
 	input.Price = decimal.Zero
-	if err := f.uc.CompleteJob(context.Background(), input); !errors.Is(err, domain.ErrInvalidQuote) {
+	if err := f.complete.Execute(context.Background(), input); !errors.Is(err, domain.ErrInvalidQuote) {
 		t.Fatalf("err=%v", err)
 	}
 	if f.job.Status != domain.JobStatusProcessing || f.quote != nil {
@@ -258,7 +265,7 @@ func TestCompleteJobRejectsInvalidQuoteBeforeSaving(t *testing.T) {
 
 func TestProcessNextCallsProviderOutsideTransaction(t *testing.T) {
 	f := newJobFixture(t)
-	f.uc.provider = rateProviderFunc(func(ctx context.Context, base, quote string) (decimal.Decimal, time.Time, error) {
+	f.process.provider = rateProviderFunc(func(ctx context.Context, base, quote string) (decimal.Decimal, time.Time, error) {
 		if f.active || ctx.Value(testTransactionKey{}) != nil {
 			t.Fatal("provider called inside transaction")
 		}
@@ -267,7 +274,7 @@ func TestProcessNextCallsProviderOutsideTransaction(t *testing.T) {
 		}
 		return decimal.RequireFromString("20.12"), time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), nil
 	})
-	claimed, err := f.uc.ProcessNext(context.Background())
+	claimed, err := f.process.Execute(context.Background())
 	if !claimed || err != nil || f.job.Status != domain.JobStatusDone || f.commits != 2 {
 		t.Fatalf("claimed=%v err=%v job=%+v", claimed, err, f.job)
 	}
@@ -280,15 +287,16 @@ func TestProcessNextRetriesProviderErrorsAndInvalidData(t *testing.T) {
 				f := newJobFixture(t)
 				f.job.Attempts = attempt - 1
 				now := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-				f.uc.now = func() time.Time { return now }
+				f.claim.now = func() time.Time { return now }
+				f.retry.now = f.claim.now
 				failure := errors.New("private provider credentials")
-				f.uc.provider = rateProviderFunc(func(context.Context, string, string) (decimal.Decimal, time.Time, error) {
+				f.process.provider = rateProviderFunc(func(context.Context, string, string) (decimal.Decimal, time.Time, error) {
 					if invalidData {
 						return decimal.Zero, now, nil
 					}
 					return decimal.Zero, time.Time{}, failure
 				})
-				claimed, err := f.uc.ProcessNext(context.Background())
+				claimed, err := f.process.Execute(context.Background())
 				if !claimed || err == nil {
 					t.Fatalf("claimed=%v err=%v", claimed, err)
 				}
@@ -311,7 +319,7 @@ func TestProcessNextRetriesProviderErrorsAndInvalidData(t *testing.T) {
 }
 
 func TestRetryDelayCapsWithoutOverflow(t *testing.T) {
-	uc := newTestUseCase(jobsStub{}, quotesStub{})
+	uc := NewRetryJob(jobsStub{}, directTransaction(), RetryConfig{RetryBase: time.Second, RetryMax: 30 * time.Second})
 	for _, tc := range []struct {
 		attempt int
 		want    time.Duration
@@ -324,17 +332,17 @@ func TestRetryDelayCapsWithoutOverflow(t *testing.T) {
 
 func TestRequestUpdateUsesDomainConstructorBeforeTransaction(t *testing.T) {
 	transactions := 0
-	uc := newTestUseCase(jobsStub{createJob: func(_ context.Context, job *domain.Job) (*domain.Job, bool, error) {
+	uc := NewRequestUpdate(jobsStub{createJob: func(_ context.Context, job *domain.Job) (*domain.Job, bool, error) {
 		if job.ID == (domain.JobID{}) || job.Status != domain.JobStatusPending || job.CreatedAt.IsZero() || job.Pair != "EUR/MXN" {
 			t.Fatalf("unconstructed job: %+v", job)
 		}
 		return job, true, nil
-	}}, quotesStub{})
+	}}, directTransaction(), testCurrencies)
 	uc.tx = transactionFunc(func(ctx context.Context, fn func(context.Context) error) error { transactions++; return fn(ctx) })
-	if _, err := uc.RequestUpdate(context.Background(), RequestQuoteUpdateInput{Pair: "eur/mxn"}); err != nil {
+	if _, err := uc.Execute(context.Background(), RequestQuoteUpdateInput{Pair: "eur/mxn"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := uc.RequestUpdate(context.Background(), RequestQuoteUpdateInput{Pair: "EUR/MXN", IdempotencyKey: strings.Repeat("x", 129)}); !errors.Is(err, domain.ErrInvalidIdempotency) {
+	if _, err := uc.Execute(context.Background(), RequestQuoteUpdateInput{Pair: "EUR/MXN", IdempotencyKey: strings.Repeat("x", 129)}); !errors.Is(err, domain.ErrInvalidIdempotency) {
 		t.Fatalf("err=%v", err)
 	}
 	if transactions != 1 {
@@ -352,11 +360,11 @@ func TestProcessNextDoesNotFetchWhenQueueEmptyOrClaimCommitFails(t *testing.T) {
 			} else {
 				f.job = nil
 			}
-			f.uc.provider = rateProviderFunc(func(context.Context, string, string) (decimal.Decimal, time.Time, error) {
+			f.process.provider = rateProviderFunc(func(context.Context, string, string) (decimal.Decimal, time.Time, error) {
 				t.Fatal("provider called without a committed claim")
 				return decimal.Zero, time.Time{}, nil
 			})
-			claimed, err := f.uc.ProcessNext(context.Background())
+			claimed, err := f.process.Execute(context.Background())
 			if claimed {
 				t.Fatal("reported an uncommitted claim")
 			}
@@ -373,11 +381,11 @@ func TestProcessNextDoesNotFetchWhenQueueEmptyOrClaimCommitFails(t *testing.T) {
 func TestProcessNextFailsInvalidStoredPairWithoutCallingProvider(t *testing.T) {
 	f := newJobFixture(t)
 	f.job.Pair = "USD/USD"
-	f.uc.provider = rateProviderFunc(func(context.Context, string, string) (decimal.Decimal, time.Time, error) {
+	f.process.provider = rateProviderFunc(func(context.Context, string, string) (decimal.Decimal, time.Time, error) {
 		t.Fatal("invalid stored pair reached provider")
 		return decimal.Zero, time.Time{}, nil
 	})
-	claimed, err := f.uc.ProcessNext(context.Background())
+	claimed, err := f.process.Execute(context.Background())
 	if !claimed || !errors.Is(err, domain.ErrInvalidPair) {
 		t.Fatalf("claimed=%v err=%v", claimed, err)
 	}

@@ -1,4 +1,3 @@
-// Package http exposes the quote API over HTTP/JSON.
 package http
 
 import (
@@ -14,14 +13,25 @@ import (
 	"currency-quotes/internal/usecase"
 )
 
-// QuotesUseCase describes the application operations needed by this transport.
-type QuotesUseCase interface {
-	RequestUpdate(context.Context, usecase.RequestQuoteUpdateInput) (*usecase.RequestUpdateResult, error)
-	GetJobResult(context.Context, usecase.GetQuoteUpdateInput) (*usecase.JobResult, error)
-	GetLatest(context.Context, usecase.GetLatestQuoteInput) (*domain.Quote, error)
+type RequestUpdateUseCase interface {
+	Execute(context.Context, usecase.RequestQuoteUpdateInput) (*usecase.RequestUpdateResult, error)
 }
 
-func New(uc QuotesUseCase, log *slog.Logger, ready func(context.Context) error, timeout time.Duration) http.Handler {
+type GetJobResultUseCase interface {
+	Execute(context.Context, usecase.GetQuoteUpdateInput) (*usecase.JobResult, error)
+}
+
+type GetLatestUseCase interface {
+	Execute(context.Context, usecase.GetLatestQuoteInput) (*domain.Quote, error)
+}
+
+type UseCases struct {
+	RequestUpdate RequestUpdateUseCase
+	GetJobResult  GetJobResultUseCase
+	GetLatest     GetLatestUseCase
+}
+
+func New(uc *UseCases, log *slog.Logger, ready func(context.Context) error, timeout time.Duration) http.Handler {
 	h := &Handler{uc: uc, log: log, ready: ready}
 	errors := &ErrorHandler{log: log}
 	router := chi.NewRouter()
@@ -46,7 +56,6 @@ func New(uc QuotesUseCase, log *slog.Logger, ready func(context.Context) error, 
 		errors.Handle(w, r, errRouteNotFound)
 	})
 	router.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		// A custom chi 405 handler must supply Allow itself.
 		var allowed []string
 		path := r.URL.RawPath
 		if path == "" {

@@ -10,7 +10,6 @@ import (
 	"currency-quotes/internal/domain"
 )
 
-// uuidQuoteRow exercises pgx UUID decoding without a running database.
 type uuidQuoteRow struct {
 	quoteID   uuid.UUID
 	jobID     uuid.UUID

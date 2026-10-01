@@ -12,7 +12,7 @@ import (
 )
 
 type Handler struct {
-	uc    QuotesUseCase
+	uc    *UseCases
 	log   *slog.Logger
 	ready func(context.Context) error
 }
@@ -23,7 +23,7 @@ func (h *Handler) requestUpdate(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	input := toRequestUpdateInput(request, r.Header.Get("Idempotency-Key"))
-	result, err := h.uc.RequestUpdate(r.Context(), input)
+	result, err := h.uc.RequestUpdate.Execute(r.Context(), input)
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func (h *Handler) getUpdate(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	result, err := h.uc.GetJobResult(r.Context(), input)
+	result, err := h.uc.GetJobResult.Execute(r.Context(), input)
 	if err != nil {
 		return err
 	}
@@ -48,7 +48,7 @@ func (h *Handler) getUpdate(w http.ResponseWriter, r *http.Request) error {
 
 func (h *Handler) getLatest(w http.ResponseWriter, r *http.Request) error {
 	input := toGetLatestInput(r.URL.Query().Get("pair"))
-	value, err := h.uc.GetLatest(r.Context(), input)
+	value, err := h.uc.GetLatest.Execute(r.Context(), input)
 	if err != nil {
 		return err
 	}

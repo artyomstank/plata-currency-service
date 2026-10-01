@@ -27,6 +27,7 @@ services:
         condition: service_healthy
 
   currency-service:
+    stop_grace_period: 20s
     build:
       context: ..
       dockerfile: deploy/Dockerfile

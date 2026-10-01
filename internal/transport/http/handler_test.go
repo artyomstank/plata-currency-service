@@ -380,6 +380,10 @@ type testTransactionManager struct{}
 func (testTransactionManager) WithinTransaction(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)
 }
-func newTestUseCase(jobs jobsStub, quotes quotesStub, currencies []string) *usecase.QuotesUseCase {
-	return usecase.New(jobs, quotes, testTransactionManager{}, nil, usecase.Config{AllowedCurrencies: currencies})
+func newTestUseCase(jobs jobsStub, quotes quotesStub, currencies []string) *UseCases {
+	return &UseCases{
+		RequestUpdate: usecase.NewRequestUpdate(jobs, testTransactionManager{}, currencies),
+		GetJobResult:  usecase.NewGetJobResult(jobs, quotes, testTransactionManager{}),
+		GetLatest:     usecase.NewGetLatest(quotes, currencies),
+	}
 }

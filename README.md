@@ -11,34 +11,40 @@ PostgreSQL; клиент проверяет результат отдельны�
 ```mermaid
 flowchart LR
     Client["Клиент"] -->|HTTP / JSON| HTTP["transport/http<br/>middleware / handler / DTO"]
-    Worker["worker<br/>опрос очереди"] -->|ProcessNext| UC["usecase<br/>сценарии приложения"]
-    HTTP -->|input + context| UC
+    App["internal/app<br/>сборка и жизненный цикл"] -.-> HTTP
+    App -.-> Worker["worker<br/>опрос очереди"]
+    Worker -->|ProcessNext.Execute| UC["usecase<br/>отдельные сценарии"]
+    HTTP -->|Execute: input + context| UC
     UC -->|конструкторы и переходы статусов| Domain["domain<br/>Job / Quote"]
     UC -->|WithinTransaction| TM["storage.TransactionManager"]
-    UC -->|JobsRepository| Jobs["storage.JobsRepo<br/>конвертеры джобы"]
-    UC -->|QuotesRepository| Quotes["storage.QuotesRepo<br/>конвертеры котировки"]
-    UC -->|RateProvider| Provider["provider.HTTPProvider"]
+    UC -->|порты сценариев| Jobs["storage.JobsRepo<br/>конвертеры джобы"]
+    UC -->|порты сценариев| Quotes["storage.QuotesRepo<br/>конвертеры котировки"]
+    UC -->|RateProvider.FetchRate| Adapter["frankfurter.Adapter<br/>ACL: внешние модели → значения приложения"]
     TM -->|BEGIN / COMMIT / ROLLBACK| DB[("PostgreSQL")]
     Jobs -->|SQL, общий tx из context| DB
     Quotes -->|SQL, общий tx из context| DB
-    Provider -->|HTTP| Rates["Frankfurter API"]
+    Adapter --> Source["frankfurter.Client<br/>запросы и внешние модели"]
+    Source --> Outbound["HTTP client<br/>logging → headers → transport"]
+    Outbound -->|HTTP| Rates["Frankfurter API"]
 ```
 
 Usecase вызывает репозитории внутри callback менеджера транзакций. Менеджер
 передаёт общий `pgx.Tx` через контекст; репозитории выполняют SQL в этой
 транзакции. Для `GetLatest` достаточно одного чтения через пул. Проверка
-`/readyz` вызывает переданный из `cmd/service` callback `pool.Ping`.
+`/readyz` вызывает переданный из `internal/app` callback `pool.Ping`.
+Пунктирные стрелки показывают сборку зависимостей; сплошные — вызовы.
 
 Направление импортов Go-пакетов отличается от направления вызовов:
 
 ```mermaid
 flowchart TD
-    Main["cmd/service<br/>сборка зависимостей"] --> HTTP["transport/http"]
-    Main --> Worker["worker"]
-    Main --> UC["usecase<br/>ports.go: контракты инфраструктуры"]
-    Main --> Storage["storage"]
-    Main --> Provider["provider"]
-    Main --> Config["config"]
+    Main["cmd/service<br/>сигналы и запуск"] --> App["internal/app<br/>сборка и жизненный цикл"]
+    App --> HTTP["transport/http"]
+    App --> Worker["worker"]
+    App --> UC["usecase<br/>сценарии и их порты"]
+    App --> Storage["storage"]
+    App --> Source["provider/frankfurter"]
+    App --> Config["config"]
     HTTP --> UC
     HTTP --> Domain["domain"]
     Storage --> UC
@@ -49,16 +55,17 @@ flowchart TD
 ```
 
 Стрелки на второй схеме означают импорты внутренних пакетов. Usecase зависит
-от домена и собственных интерфейсов; реализации передаются в `cmd/service`.
+от домена и собственных интерфейсов; реализации передаются в `internal/app`.
 `worker` вызывает usecase через свой интерфейс `JobProcessor`, поэтому ему
 не нужен импорт пакета `usecase`. Реализации удовлетворяют интерфейсам
-структурно. `storage` импортирует `usecase` для типа `JobUpdate`; `provider`
+структурно. `storage` импортирует `usecase` для типа `JobUpdate`; `frankfurter`
 не импортирует внутренние пакеты приложения. Домен не импортирует остальные
 слои приложения.
 
-Один процесс `cmd/service` обслуживает HTTP и запускает воркеры. Обработчики
+Один процесс обслуживает HTTP и запускает воркеры. `internal/app` собирает
+зависимости, запускает HTTP и воркеры и управляет их остановкой. Обработчики
 используют `net/http` и chi, напрямую вызывая `internal/usecase`. Хранилище и
-очередь находятся в `internal/storage`, получение курса — в `internal/provider`,
+очередь находятся в `internal/storage`, получение курса — в `internal/provider/frankfurter`,
 сценарии фоновой обработки — в `internal/usecase`. `internal/worker` только
 опрашивает usecase и логирует ошибки.
 
@@ -78,9 +85,12 @@ flowchart TD
 пары остаётся в домене. Бизнес-обработчики транспорта передают операции с БД
 в usecase; транзакциями управляет usecase через `TransactionManager`.
 
-В usecase `quotes.go` содержит HTTP-сценарии, `jobs.go` — `ClaimPending`,
-`CompleteJob`, `RetryJob` и полный сценарий `ProcessNext`; контракты двух
-репозиториев, провайдера и менеджера транзакций находятся в `ports.go`.
+Каждый usecase — отдельный сценарий со своим конструктором и методом `Execute`:
+`request_update.go`, `get_job_result.go`, `get_latest.go`, `claim_pending.go`,
+`complete_job.go`, `retry_job.go` и `process_next.go`. `ProcessNext` оркестрирует
+claim, обращение к источнику и complete либо retry. Узкие интерфейсы репозиториев
+объявлены рядом со сценариями, которые их используют; `RateProvider` — в
+`process_next.go`. Общие контракт транзакций и метаданные очереди — в `ports.go`.
 Новые джобы и котировки создаются через конструкторы домена, переходы статусов
 выполняют `Start`, `Reclaim`, `Complete`, `RetryOrFail` и `Fail`.
 
@@ -169,40 +179,50 @@ Complete и retry проверяют lease token под блокировкой �
 ```mermaid
 sequenceDiagram
     participant W as worker
-    participant U as usecase
+    participant U as ProcessNext
+    participant C as ClaimPending
+    participant F as CompleteJob
     participant T as TransactionManager
     participant J as JobsRepo
     participant D as domain
-    participant P as HTTPProvider
+    participant P as frankfurter.Adapter
+    participant H as frankfurter.Client / HTTP client
     participant Q as QuotesRepo
 
-    W->>U: ProcessNext(ctx)
-    U->>T: WithinTransaction(ctx, claim callback)
+    W->>U: Execute(ctx)
+    U->>C: Execute(ctx)
+    C->>T: WithinTransaction(ctx, claim callback)
     T->>T: BEGIN, context с tx
-    T->>U: claim callback(txCtx)
-    U->>J: LockNextAvailable(txCtx)
-    J-->>U: заблокированная Job
-    U->>D: Job.Start() / Job.Reclaim()
-    U->>J: Save(txCtx, job, lease)
-    U-->>T: nil
+    T->>C: claim callback(txCtx)
+    C->>J: LockNextAvailable(txCtx)
+    J-->>C: заблокированная Job
+    C->>D: Job.Start() / Job.Reclaim()
+    C->>J: Save(txCtx, job, lease)
+    C-->>T: nil
     T->>T: COMMIT
-    T-->>U: claim сохранён
+    T-->>C: claim сохранён
+    C-->>U: Job с lease token
 
     U->>P: FetchRate(ctx, base, quote)
+    P->>H: Latest(ctx, внешний запрос)
+    H-->>P: внешняя модель ответа
+    Note over P,H: HTTP вне транзакции; ACL проверяет и преобразует ответ
     P-->>U: price, sourceTime
 
-    U->>T: WithinTransaction(ctx, complete callback)
+    U->>F: Execute(ctx, CompleteJobInput)
+    F->>T: WithinTransaction(ctx, complete callback)
     T->>T: BEGIN, context с tx
-    T->>U: complete callback(txCtx)
-    U->>J: GetByIDForUpdate(txCtx, jobID)
-    J-->>U: Job с актуальным lease token
-    Note over U,J: usecase проверяет lease token
-    U->>D: NewQuote(...), Job.Complete(quote)
-    U->>J: Save(txCtx, job, expectedLeaseToken)
-    U->>Q: Save(txCtx, quote)
-    U-->>T: nil
+    T->>F: complete callback(txCtx)
+    F->>J: GetByIDForUpdate(txCtx, jobID)
+    J-->>F: Job с актуальным lease token
+    Note over F,J: сценарий проверяет lease token
+    F->>D: NewQuote(...), Job.Complete(quote)
+    F->>J: Save(txCtx, job, expectedLeaseToken)
+    F->>Q: Save(txCtx, quote)
+    F-->>T: nil
     T->>T: COMMIT
-    T-->>U: обе записи сохранены
+    T-->>F: обе записи сохранены
+    F-->>U: nil
     U-->>W: claimed=true, err=nil
 ```
 
@@ -226,6 +246,13 @@ usecase запускает отдельную транзакцию retry: бло
 `https://api.frankfurter.app`. Base URL и таймаут настраиваются через
 `PROVIDER_BASE_URL` и `PROVIDER_TIMEOUT`. Дата курса источника хранится отдельно
 от времени сохранения результата.
+
+В `internal/provider/frankfurter` HTTP-клиент владеет своим transport и общим таймаутом.
+Middleware добавляют `Accept`/`User-Agent` и логируют статус и длительность
+запроса. `client.go` отвечает за HTTP и внешние модели из `models.go`;
+`adapter.go` переводит ответ источника в decimal и время, проверяет дату,
+базовую валюту и курс. Внешние модели не выходят в usecase. Повторы выполняет
+сценарий фоновой обработки; HTTP-клиент не добавляет собственные попытки.
 
 ## Локальный запуск
 
@@ -281,8 +308,15 @@ PostgreSQL volume сохраняется. Остановка без удален
 | `PROVIDER_TIMEOUT` | `5s` |
 
 `HTTP_REQUEST_TIMEOUT` ограничивает операции обработчика с БД, включая
-readiness; чтение тела ограничивается `HTTP_READ_TIMEOUT`. При остановке
-сервис завершает HTTP-запросы и ждёт остановки воркеров перед закрытием пула БД.
+readiness; чтение тела ограничивается `HTTP_READ_TIMEOUT`. При сигнале остановки
+или ошибке HTTP-сервера приложение прекращает опрос очереди и одновременно
+ждёт завершения активных HTTP-запросов и джоб. Их контексты сохраняются до
+завершения либо истечения `SHUTDOWN_TIMEOUT`. После таймаута контексты
+отменяются и HTTP-соединения закрываются; приложение ждёт выхода воркеров,
+затем закрывает пул БД и соединения исходящего HTTP-клиента. Незавершённую
+джобу следующий процесс заберёт после истечения lease.
+Compose задаёт `stop_grace_period: 20s`, чтобы Docker дал приложению время
+на штатную остановку при стандартном `SHUTDOWN_TIMEOUT=10s`.
 
 ## Миграции и проверки
 
