@@ -29,7 +29,7 @@ func (a *application) serve(ctx context.Context, listener net.Listener) error {
 	a.server.BaseContext = func(net.Listener) context.Context { return httpCtx }
 	var workers sync.WaitGroup
 	for range a.workerCount {
-		w := worker.New(a.processor, worker.Config{PollInterval: a.pollInterval}, a.log)
+		w := worker.New(a.processor, a.workerConfig, a.log)
 		workers.Go(func() { w.Run(workerCtx, stopPolling) })
 	}
 	workersDone := make(chan struct{})

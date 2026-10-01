@@ -8,20 +8,21 @@ import (
 	"currency-quotes/internal/domain"
 )
 
-type ResultJobs interface {
+type JobReader interface {
 	GetByID(context.Context, domain.JobID) (*domain.Job, error)
 }
-type ResultQuotes interface {
+
+type QuoteByJobReader interface {
 	GetByJobID(context.Context, domain.JobID) (*domain.Quote, error)
 }
 
 type GetJobResult struct {
-	jobs   ResultJobs
-	quotes ResultQuotes
+	jobs   JobReader
+	quotes QuoteByJobReader
 	tx     TransactionManager
 }
 
-func NewGetJobResult(jobs ResultJobs, quotes ResultQuotes, tx TransactionManager) *GetJobResult {
+func NewGetJobResult(jobs JobReader, quotes QuoteByJobReader, tx TransactionManager) *GetJobResult {
 	return &GetJobResult{jobs: jobs, quotes: quotes, tx: tx}
 }
 

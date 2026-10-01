@@ -6,6 +6,40 @@
 окружения процесса. Чтение ENV-файла делает Make или Compose, а не приложение.
 Локальный пример — [deploy/.env.local.example](../deploy/.env.local.example).
 
+<a id="structure"></a>
+
+## Структура конфигурации
+
+`ServiceConfig` собирает настройки компонентов, а не повторяет их поля:
+
+| Поле | Тип и место объявления | Использование |
+| --- | --- | --- |
+| `Postgres` | [postgres.PoolConfig](../pkg/postgres/pool.go) | Создание пула PostgreSQL |
+| `HTTPServer` | [httpserver.Config](../pkg/httpserver/server.go) | Listener address, read/write/idle timeouts и лимит заголовков |
+| `HTTPTransport` | [http.Config](../internal/transport/http/router.go) | Deadline запроса и лимит тела в middleware |
+| `Frankfurter` | [frankfurter.ClientConfig](../internal/provider/frankfurter/client.go) | Base URL клиента источника |
+| `FrankfurterHTTP` | [httpclient.Config](../pkg/httpclient/client.go) | Timeout исходящего HTTP client |
+| `Worker` | [worker.Config](../internal/worker/worker.go) | Интервал опроса одного воркера |
+| `Currencies` | [usecase.CurrencyConfig](../internal/usecase/request_update.go) | Допуск валют для RequestUpdate и GetLatest |
+| `ClaimPending` | [usecase.ClaimPendingConfig](../internal/usecase/claim_pending.go) | Длительность lease при claim/reclaim |
+| `RetryJob` | [usecase.RetryConfig](../internal/usecase/retry_job.go) | Число попыток и backoff |
+| `Runtime` | [config.RuntimeConfig](../internal/config/config.go) | Число воркеров и общий shutdown timeout приложения |
+
+Типы компонентов объявлены возле потребителей. Они не читают ENV и не
+импортируют общий пакет `internal/config`. `RuntimeConfig` остаётся в общем
+конфиге, чтобы загрузчик не импортировал `internal/app` и не создавал цикл.
+
+`LoadServiceConfig` назначает defaults, читает ENV, нормализует валюты и
+проверяет значения, включая связь lease и timeout провайдера. `app.Run`
+по-прежнему вызывает загрузчик до открытия ресурсов. Композиция передаёт
+готовые группы в конструкторы: `postgres.NewPool(ctx, cfg.Postgres)`,
+`httpclient.New(cfg.FrankfurterHTTP, ...)`, `worker.New(processor, cfg.Worker, log)`.
+
+Имена ENV и defaults сохранены. `HTTP_READ_TIMEOUT` заполняет оба поля
+`ReadTimeout` и `ReadHeaderTimeout`. Лимиты тела и заголовков равны 1 MiB;
+отдельных ENV для них нет. Migrator продолжает использовать тот же загрузчик,
+берёт настройки PostgreSQL и задаёт размер своего пула равным одному.
+
 <a id="currencies"></a>
 
 ## Разрешённые валюты

@@ -1,53 +1,26 @@
-package repo
+package job
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"currency-quotes/internal/domain"
+	repopostgres "currency-quotes/internal/repo/postgres"
 	"currency-quotes/internal/usecase"
+	"currency-quotes/pkg/postgres"
 )
 
-type JobsRepo struct {
+type Repository struct {
 	pool *pgxpool.Pool
 }
 
-func NewJobsRepo(pool *pgxpool.Pool) *JobsRepo {
-	return &JobsRepo{pool: pool}
-}
-
-type jobModel struct {
-	ID             uuid.UUID
-	Pair           string
-	IdempotencyKey string
-	Status         string
-	ErrorMessage   string
-	Attempts       int
-	LeaseToken     uuid.UUID
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
-func jobToModel(job *domain.Job) jobModel {
-	return jobModel{
-		ID: uuid.UUID(job.ID), Pair: job.Pair, IdempotencyKey: job.IdempotencyKey,
-		Status: string(job.Status), ErrorMessage: job.ErrorMessage, Attempts: job.Attempts,
-		LeaseToken: job.LeaseToken, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
-	}
-}
-
-func (m jobModel) toDomain() *domain.Job {
-	return &domain.Job{
-		ID: domain.JobID(m.ID), Pair: m.Pair, IdempotencyKey: m.IdempotencyKey,
-		Status: domain.JobStatus(m.Status), ErrorMessage: m.ErrorMessage, Attempts: m.Attempts,
-		LeaseToken: m.LeaseToken, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
-	}
+func New(pool *pgxpool.Pool) *Repository {
+	return &Repository{pool: pool}
 }
 
 const jobColumns = `id, pair, coalesce(idempotency_key, ''), status,
@@ -70,8 +43,8 @@ func scanJob(row pgx.Row) (*domain.Job, error) {
 	return m.toDomain(), nil
 }
 
-func (r *JobsRepo) Create(ctx context.Context, job *domain.Job) (*domain.Job, bool, error) {
-	tx, err := requireTransaction(ctx)
+func (r *Repository) Create(ctx context.Context, job *domain.Job) (*domain.Job, bool, error) {
+	tx, err := postgres.RequireTransaction(ctx)
 	if err != nil {
 		return nil, false, err
 	}
@@ -92,21 +65,21 @@ func (r *JobsRepo) Create(ctx context.Context, job *domain.Job) (*domain.Job, bo
 	return stored.toDomain(), created, nil
 }
 
-func (r *JobsRepo) GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error) {
-	return scanJob(queryExecutor(ctx, r.pool).QueryRow(ctx,
+func (r *Repository) GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error) {
+	return scanJob(repopostgres.QueryExecutor(ctx, r.pool).QueryRow(ctx,
 		`SELECT `+jobColumns+` FROM quote_jobs WHERE id = $1`, uuid.UUID(id)))
 }
 
-func (r *JobsRepo) GetByIDForUpdate(ctx context.Context, id domain.JobID) (*domain.Job, error) {
-	tx, err := requireTransaction(ctx)
+func (r *Repository) GetByIDForUpdate(ctx context.Context, id domain.JobID) (*domain.Job, error) {
+	tx, err := postgres.RequireTransaction(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM quote_jobs WHERE id = $1 FOR UPDATE`, uuid.UUID(id)))
 }
 
-func (r *JobsRepo) LockNextAvailable(ctx context.Context) (*domain.Job, error) {
-	tx, err := requireTransaction(ctx)
+func (r *Repository) LockNextAvailable(ctx context.Context) (*domain.Job, error) {
+	tx, err := postgres.RequireTransaction(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +97,8 @@ func (r *JobsRepo) LockNextAvailable(ctx context.Context) (*domain.Job, error) {
 	return job, err
 }
 
-func (r *JobsRepo) Save(ctx context.Context, job *domain.Job, update usecase.JobUpdate) error {
-	tx, err := requireTransaction(ctx)
+func (r *Repository) Save(ctx context.Context, job *domain.Job, update usecase.JobUpdate) error {
+	tx, err := postgres.RequireTransaction(ctx)
 	if err != nil {
 		return err
 	}
@@ -146,18 +119,4 @@ func (r *JobsRepo) Save(ctx context.Context, job *domain.Job, update usecase.Job
 		return domain.ErrClaimLost
 	}
 	return nil
-}
-
-func nullableUUID(id uuid.UUID) any {
-	if id == uuid.Nil {
-		return nil
-	}
-	return id
-}
-
-func nullableTime(value time.Time) any {
-	if value.IsZero() {
-		return nil
-	}
-	return value
 }

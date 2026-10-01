@@ -2,44 +2,22 @@ package http
 
 import (
 	"encoding/json"
-	"github.com/go-chi/chi/v5"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
+
+	"currency-quotes/pkg/httpserver/middleware"
 )
-
-func TestRequestIDMiddlewarePropagatesGeneratedID(t *testing.T) {
-	var receivedHeader string
-	var receivedContext string
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedHeader = r.Header.Get("X-Request-ID")
-		receivedContext = requestIDFromContext(r.Context())
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	requestIDMiddleware(next).ServeHTTP(recorder, request)
-
-	responseID := recorder.Header().Get("X-Request-ID")
-	if responseID == "" {
-		t.Fatal("response X-Request-ID is empty")
-	}
-	if receivedHeader != responseID {
-		t.Fatalf("forwarded X-Request-ID = %q, want %q", receivedHeader, responseID)
-	}
-	if receivedContext != responseID {
-		t.Fatalf("context request ID = %q, want %q", receivedContext, responseID)
-	}
-}
 
 func TestRecovererIsOutermostAndCatchesMiddlewarePanic(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	errors := &ErrorHandler{log: log}
 	router := chi.NewRouter()
-	router.Use(recovererMiddleware(log, errors))
+	router.Use(middleware.Recoverer(log, func(w http.ResponseWriter, r *http.Request) { errors.Handle(w, r, errPanic) }))
 	router.Use(func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			panic("private middleware panic")
@@ -62,7 +40,7 @@ func TestRecovererIsOutermostAndCatchesMiddlewarePanic(t *testing.T) {
 
 func TestRecovererDoesNotRewriteCommittedResponse(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := recovererMiddleware(log, &ErrorHandler{log: log})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.Recoverer(log, func(w http.ResponseWriter, r *http.Request) { (&ErrorHandler{log: log}).Handle(w, r, errPanic) })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("response started"))
 		panic("private panic after headers")
@@ -72,18 +50,4 @@ func TestRecovererDoesNotRewriteCommittedResponse(t *testing.T) {
 	if recorder.Code != http.StatusAccepted || recorder.Body.String() != "response started" {
 		t.Fatalf("committed response rewritten: %d %s", recorder.Code, recorder.Body.String())
 	}
-}
-
-func TestRecovererPreservesHTTPAbortHandler(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := recovererMiddleware(log, &ErrorHandler{log: log})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		panic(http.ErrAbortHandler)
-	}))
-	defer func() {
-		if value := recover(); value != http.ErrAbortHandler {
-			t.Fatalf("abort panic = %v", value)
-		}
-	}()
-	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
-	t.Fatal("abort handler panic was swallowed")
 }

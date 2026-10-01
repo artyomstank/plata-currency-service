@@ -1,6 +1,7 @@
-package repo
+package quote
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -45,5 +46,11 @@ func TestScanQuoteValueMapsDistinctIDs(t *testing.T) {
 	}
 	if quote.Price.String() != "19.123456789012345678" {
 		t.Fatalf("incorrect price: %s", quote.Price)
+	}
+}
+
+func TestRepositoryRequiresTransactionForWrites(t *testing.T) {
+	if err := New(nil).Save(context.Background(), nil); err == nil {
+		t.Fatal("quote accepted without transaction")
 	}
 }

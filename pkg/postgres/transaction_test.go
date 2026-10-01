@@ -1,4 +1,4 @@
-package repo
+package postgres
 
 import (
 	"context"
@@ -6,9 +6,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-
-	"currency-quotes/internal/domain"
-	"currency-quotes/internal/usecase"
 )
 
 type beginnerStub struct {
@@ -48,10 +45,10 @@ func TestTransactionManagerCommitsAndSharesTransaction(t *testing.T) {
 		if txCtx.Value(requestContextKey{}) != "request-1" {
 			t.Fatal("request context lost")
 		}
-		if got := queryExecutor(txCtx, nil); got != tx {
-			t.Fatal("repository did not use transaction")
+		if got, ok := TransactionFromContext(txCtx); !ok || got != tx {
+			t.Fatal("transaction missing from context")
 		}
-		if got, err := requireTransaction(txCtx); err != nil || got != tx {
+		if got, err := RequireTransaction(txCtx); err != nil || got != tx {
 			t.Fatalf("transaction=%v err=%v", got, err)
 		}
 		return nil
@@ -113,25 +110,5 @@ func TestTransactionManagerDoesNotRunCallbackWhenBeginFails(t *testing.T) {
 	err := manager.WithinTransaction(context.Background(), func(context.Context) error { t.Fatal("callback executed"); return nil })
 	if !errors.Is(err, failure) {
 		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestRepositoriesRequireTransactionForWritesAndLocks(t *testing.T) {
-	ctx := context.Background()
-	jobs, quotes := NewJobsRepo(nil), NewQuotesRepo(nil)
-	if _, _, err := jobs.Create(ctx, nil); err == nil {
-		t.Fatal("create accepted without transaction")
-	}
-	if _, err := jobs.LockNextAvailable(ctx); err == nil {
-		t.Fatal("claim accepted without transaction")
-	}
-	if _, err := jobs.GetByIDForUpdate(ctx, domain.JobID{}); err == nil {
-		t.Fatal("lock accepted without transaction")
-	}
-	if err := jobs.Save(ctx, nil, usecase.JobUpdate{}); err == nil {
-		t.Fatal("save accepted without transaction")
-	}
-	if err := quotes.Save(ctx, nil); err == nil {
-		t.Fatal("quote accepted without transaction")
 	}
 }

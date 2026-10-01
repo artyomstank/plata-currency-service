@@ -17,13 +17,13 @@ type RetryConfig struct {
 	RetryMax    time.Duration
 }
 type RetryJob struct {
-	jobs   ClaimedJobs
+	jobs   JobUpdater
 	tx     TransactionManager
 	config RetryConfig
 	now    func() time.Time
 }
 
-func NewRetryJob(jobs ClaimedJobs, tx TransactionManager, config RetryConfig) *RetryJob {
+func NewRetryJob(jobs JobUpdater, tx TransactionManager, config RetryConfig) *RetryJob {
 	return &RetryJob{jobs: jobs, tx: tx, config: config, now: time.Now}
 }
 

@@ -10,12 +10,12 @@ import (
 	"currency-quotes/internal/domain"
 )
 
-type ClaimedJobs interface {
+type JobUpdater interface {
 	GetByIDForUpdate(context.Context, domain.JobID) (*domain.Job, error)
 	Save(context.Context, *domain.Job, JobUpdate) error
 }
 
-func loadClaim(ctx context.Context, jobs ClaimedJobs, id domain.JobID, token uuid.UUID) (*domain.Job, error) {
+func loadClaim(ctx context.Context, jobs JobUpdater, id domain.JobID, token uuid.UUID) (*domain.Job, error) {
 	if id == (domain.JobID{}) {
 		return nil, domain.ErrInvalidJobID
 	}

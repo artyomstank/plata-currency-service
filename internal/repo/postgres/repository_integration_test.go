@@ -1,6 +1,6 @@
 //go:build integration
 
-package repo
+package postgres_test
 
 import (
 	"context"
@@ -15,8 +15,11 @@ import (
 	"github.com/shopspring/decimal"
 
 	"currency-quotes/internal/domain"
+	jobrepo "currency-quotes/internal/repo/postgres/job"
+	quoterepo "currency-quotes/internal/repo/postgres/quote"
 	"currency-quotes/internal/usecase"
 	"currency-quotes/migrations"
+	"currency-quotes/pkg/postgres"
 )
 
 type integrationCases struct {
@@ -61,12 +64,12 @@ func integrationUseCase(t *testing.T) (*integrationCases, *pgxpool.Pool) {
 			t.Fatalf("temporary schema from %s: %v", name, err)
 		}
 	}
-	jobs, quotes, tx := NewJobsRepo(pool), NewQuotesRepo(pool), NewTransactionManager(pool)
+	jobs, quotes, tx := jobrepo.New(pool), quoterepo.New(pool), postgres.NewTransactionManager(pool)
 	uc := &integrationCases{
-		RequestUpdate: usecase.NewRequestUpdate(jobs, tx, []string{"EUR", "MXN", "USD"}),
+		RequestUpdate: usecase.NewRequestUpdate(jobs, tx, usecase.CurrencyConfig{AllowedCurrencies: []string{"EUR", "MXN", "USD"}}),
 		GetJobResult:  usecase.NewGetJobResult(jobs, quotes, tx),
-		GetLatest:     usecase.NewGetLatest(quotes, []string{"EUR", "MXN", "USD"}),
-		ClaimPending:  usecase.NewClaimPending(jobs, tx, 30*time.Second),
+		GetLatest:     usecase.NewGetLatest(quotes, usecase.CurrencyConfig{AllowedCurrencies: []string{"EUR", "MXN", "USD"}}),
+		ClaimPending:  usecase.NewClaimPending(jobs, tx, usecase.ClaimPendingConfig{LeaseDuration: 30 * time.Second}),
 		CompleteJob:   usecase.NewCompleteJob(jobs, quotes, tx),
 		RetryJob:      usecase.NewRetryJob(jobs, tx, usecase.RetryConfig{MaxAttempts: 2, RetryBase: time.Second, RetryMax: 30 * time.Second}),
 	}
@@ -139,11 +142,11 @@ func TestIntegrationQuoteInsertFailureRollsBackJobStatus(t *testing.T) {
 	if err := uc.CompleteJob.Execute(context.Background(), input); err == nil {
 		t.Fatal("expected numeric overflow")
 	}
-	stored, err := NewJobsRepo(pool).GetByID(context.Background(), job.ID)
+	stored, err := jobrepo.New(pool).GetByID(context.Background(), job.ID)
 	if err != nil || stored.Status != domain.JobStatusProcessing || stored.LeaseToken != job.LeaseToken {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
-	if _, err := NewQuotesRepo(pool).GetByJobID(context.Background(), job.ID); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := quoterepo.New(pool).GetByJobID(context.Background(), job.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("quote persisted after rollback: %v", err)
 	}
 	if err := uc.CompleteJob.Execute(context.Background(), integrationCompletion(job)); err != nil {

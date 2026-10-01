@@ -10,20 +10,24 @@ import (
 	"currency-quotes/internal/domain"
 )
 
-type PendingJobs interface {
+type JobClaimer interface {
 	LockNextAvailable(context.Context) (*domain.Job, error)
 	Save(context.Context, *domain.Job, JobUpdate) error
 }
 
+type ClaimPendingConfig struct {
+	LeaseDuration time.Duration
+}
+
 type ClaimPending struct {
-	jobs          PendingJobs
+	jobs          JobClaimer
 	tx            TransactionManager
 	leaseDuration time.Duration
 	now           func() time.Time
 }
 
-func NewClaimPending(jobs PendingJobs, tx TransactionManager, leaseDuration time.Duration) *ClaimPending {
-	return &ClaimPending{jobs: jobs, tx: tx, leaseDuration: leaseDuration, now: time.Now}
+func NewClaimPending(jobs JobClaimer, tx TransactionManager, cfg ClaimPendingConfig) *ClaimPending {
+	return &ClaimPending{jobs: jobs, tx: tx, leaseDuration: cfg.LeaseDuration, now: time.Now}
 }
 
 func (uc *ClaimPending) Execute(ctx context.Context) (*domain.Job, error) {

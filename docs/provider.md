@@ -40,13 +40,18 @@ flowchart LR
 | Файл | Ответственность |
 | --- | --- |
 | [models.go](../internal/provider/frankfurter/models.go) | Приватные `latestRequest`, `latestResponse` — формат внешнего API |
-| [http_client.go](../internal/provider/frankfurter/http_client.go) | Собственный transport, общий timeout, middleware заголовков и логов |
+| [pkg/httpclient/client.go](../pkg/httpclient/client.go) | Собственный transport и общий timeout |
+| [pkg/httpclient/middleware.go](../pkg/httpclient/middleware.go) | Общие middleware заголовков и логов, закрытие idle connections |
+| [internal/app/app.go](../internal/app/app.go) | Сборка клиента с заголовками и настройками Frankfurter |
 | [client.go](../internal/provider/frankfurter/client.go) | URL, GET, HTTP-статус, ограниченное чтение и JSON decoding |
 | [adapter.go](../internal/provider/frankfurter/adapter.go) | Проверка ответа и перевод внешней модели в значения приложения |
 
-`NewHTTPClient` клонирует стандартный transport. Middleware добавляют
-`Accept: application/json`, `User-Agent: currency-service/frankfurter` и
-записывают метод, HTTP-статус, длительность и ошибку без тела ответа.
+`httpclient.New` клонирует стандартный transport и применяет middleware
+в порядке передачи: logging → headers → transport. В `internal/app`
+задаются timeout, сообщение `Frankfurter HTTP request` и заголовки
+`Accept: application/json`, `User-Agent: currency-service/frankfurter`.
+Пакет `pkg/httpclient` не содержит настроек или моделей конкретного провайдера.
+Middleware логов записывает метод, HTTP-статус, длительность и ошибку без тела ответа.
 Успешные обращения логируются на Debug, ошибки — на Warn; при стандартном
 Info-логгере успешные исходящие запросы не отображаются. Контекст запроса
 сохраняется, `CloseIdleConnections` проходит через всю цепочку middleware.
@@ -66,6 +71,8 @@ GET /latest?from=GBP&to=CHF
 Числа читаются как `json.Number`. ACL переводит значение напрямую в
 `decimal.Decimal`, не используя `float64`, и возвращает `(price, sourceTime)`.
 Внешняя структура не выходит за пределы пакета провайдера.
+`NewClient` принимает `ClientConfig` с `BaseURL`; timeout находится в
+`ServiceConfig.FrankfurterHTTP` и передаётся общему HTTP client при композиции.
 
 Порт [RateProvider](../internal/usecase/process_next.go) объявлен в сценарии,
 который потребляет курс. `rateClient` объявлен у адаптера, `httpDoer` — у

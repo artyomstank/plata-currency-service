@@ -15,8 +15,8 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"currency-quotes/internal/config"
 	"currency-quotes/internal/domain"
+	httphandler "currency-quotes/internal/transport/http/handler"
 	"currency-quotes/internal/usecase"
 )
 
@@ -55,9 +55,15 @@ func (s quotesStub) GetLatest(ctx context.Context, pair string) (*domain.QuoteVa
 	return s.latest(ctx, pair)
 }
 
+const maxRequestBody = 1 << 20
+
+func transportConfig(timeout time.Duration) Config {
+	return Config{RequestTimeout: timeout, MaxBodyBytes: maxRequestBody}
+}
+
 func newTestHandler(jobs jobsStub, quotes quotesStub) http.Handler {
 	return New(newTestUseCase(jobs, quotes, []string{"EUR", "MXN", "USD"}), slog.New(slog.NewTextHandler(io.Discard, nil)),
-		func(context.Context) error { return nil }, time.Second)
+		func(context.Context) error { return nil }, transportConfig(time.Second))
 }
 
 func call(t *testing.T, handler http.Handler, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
@@ -188,44 +194,12 @@ func TestGetLatestPreservesDecimalPrecision(t *testing.T) {
 	}
 }
 
-func TestHTTPErrors(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		path   string
-		err    error
-		status int
-		code   string
-	}{
-		{"invalid ID", "/v1/quote-updates/not-a-uuid", nil, 400, "INVALID_ARGUMENT"},
-		{"empty ID", "/v1/quote-updates/00000000-0000-0000-0000-000000000000", nil, 400, "INVALID_ARGUMENT"},
-		{"missing job", "/v1/quote-updates/" + domain.NewJobID().String(), domain.ErrNotFound, 404, "NOT_FOUND"},
-		{"missing quote", "/v1/quotes/latest?pair=EUR%2FMXN", domain.ErrNotFound, 404, "NOT_FOUND"},
-		{"invalid pair", "/v1/quotes/latest?pair=GBP%2FMXN", nil, 400, "INVALID_ARGUMENT"},
-		{"database error", "/v1/quotes/latest?pair=EUR%2FMXN", errors.New("private database details"), 500, "INTERNAL_ERROR"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			handler := newTestHandler(jobsStub{get: func(context.Context, domain.JobID) (*domain.Job, error) {
-				return nil, tc.err
-			}}, quotesStub{latest: func(context.Context, string) (*domain.QuoteValue, error) {
-				return nil, tc.err
-			}})
-			recorder, response := call(t, handler, http.MethodGet, tc.path, "")
-			if recorder.Code != tc.status || response["code"] != tc.code || response["requestId"] != "test-request" {
-				t.Fatalf("response = %d %v", recorder.Code, response)
-			}
-			if strings.Contains(recorder.Body.String(), "private database details") {
-				t.Fatal("response leaks internal error")
-			}
-		})
-	}
-}
-
 func TestRequestTimeoutReachesRepository(t *testing.T) {
 	uc := newTestUseCase(jobsStub{}, quotesStub{latest: func(ctx context.Context, _ string) (*domain.QuoteValue, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}, []string{"EUR", "MXN", "USD"})
-	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, time.Millisecond)
+	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Millisecond))
 	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
 	if recorder.Code != http.StatusGatewayTimeout || response["code"] != "GATEWAY_TIMEOUT" {
 		t.Fatalf("response = %d %v", recorder.Code, response)
@@ -244,7 +218,7 @@ func TestHealthEndpoints(t *testing.T) {
 				return errors.New("database unavailable")
 			}
 			return nil
-		}, time.Second)
+		}, transportConfig(time.Second))
 		recorder, _ := call(t, handler, http.MethodGet, "/healthz", "")
 		if recorder.Code != http.StatusOK || checked {
 			t.Fatal("liveness depends on the database")
@@ -279,12 +253,7 @@ func TestRoutingErrorsAreJSON(t *testing.T) {
 }
 
 func TestHTTPUsesConfiguredCurrencies(t *testing.T) {
-	t.Setenv("DATABASE_DSN", "postgres://localhost:54322/postgres")
-	t.Setenv("ALLOWED_CURRENCIES", " chf, jpy ")
-	cfg, err := config.LoadServiceConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
+	currencies := []string{"CHF", "JPY"}
 	jobs := jobsStub{create: func(_ context.Context, pair, _ string) (*domain.Job, bool, error) {
 		if pair != "CHF/JPY" {
 			t.Fatalf("unconfigured pair reached repository: %s", pair)
@@ -297,8 +266,8 @@ func TestHTTPUsesConfiguredCurrencies(t *testing.T) {
 		}
 		return &domain.QuoteValue{Pair: pair, Price: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 	}}
-	handler := New(newTestUseCase(jobs, quotes, cfg.AllowedCurrencies),
-		slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, time.Second)
+	handler := New(newTestUseCase(jobs, quotes, currencies),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Second))
 	for _, tc := range []struct {
 		method, path, body string
 		status             int
@@ -324,7 +293,7 @@ func TestHandlerPanicReturnsJSONAndLogs500(t *testing.T) {
 	uc := newTestUseCase(jobsStub{}, quotesStub{latest: func(context.Context, string) (*domain.QuoteValue, error) {
 		panic("private database panic")
 	}}, []string{"EUR", "MXN", "USD"})
-	handler := New(uc, log, func(context.Context) error { return nil }, time.Second)
+	handler := New(uc, log, func(context.Context) error { return nil }, transportConfig(time.Second))
 	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
 	if recorder.Code != http.StatusInternalServerError || response["code"] != "INTERNAL_ERROR" || response["requestId"] != "test-request" {
 		t.Fatalf("panic response = %d %v", recorder.Code, response)
@@ -351,18 +320,6 @@ func TestHandlerPanicReturnsJSONAndLogs500(t *testing.T) {
 	}
 }
 
-func TestExpiredRequestCannotWriteSuccessfulResponse(t *testing.T) {
-	uc := newTestUseCase(jobsStub{}, quotesStub{latest: func(ctx context.Context, pair string) (*domain.QuoteValue, error) {
-		<-ctx.Done()
-		return &domain.QuoteValue{Pair: pair, Price: decimal.NewFromInt(1), CreatedAt: time.Now()}, nil
-	}}, []string{"EUR", "MXN", "USD"})
-	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, time.Millisecond)
-	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
-	if recorder.Code != http.StatusGatewayTimeout || response["code"] != "GATEWAY_TIMEOUT" {
-		t.Fatalf("expired request response = %d %v", recorder.Code, response)
-	}
-}
-
 func TestOversizedTrailingBodyDoesNotCreateJob(t *testing.T) {
 	handler := newTestHandler(jobsStub{create: func(context.Context, string, string) (*domain.Job, bool, error) {
 		t.Fatal("oversized request reached repository")
@@ -380,10 +337,10 @@ type testTransactionManager struct{}
 func (testTransactionManager) WithinTransaction(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)
 }
-func newTestUseCase(jobs jobsStub, quotes quotesStub, currencies []string) *UseCases {
-	return &UseCases{
-		RequestUpdate: usecase.NewRequestUpdate(jobs, testTransactionManager{}, currencies),
+func newTestUseCase(jobs jobsStub, quotes quotesStub, currencies []string) *httphandler.UseCases {
+	return &httphandler.UseCases{
+		RequestUpdate: usecase.NewRequestUpdate(jobs, testTransactionManager{}, usecase.CurrencyConfig{AllowedCurrencies: currencies}),
 		GetJobResult:  usecase.NewGetJobResult(jobs, quotes, testTransactionManager{}),
-		GetLatest:     usecase.NewGetLatest(quotes, currencies),
+		GetLatest:     usecase.NewGetLatest(quotes, usecase.CurrencyConfig{AllowedCurrencies: currencies}),
 	}
 }

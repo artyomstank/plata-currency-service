@@ -17,12 +17,12 @@ type QuoteWriter interface {
 }
 
 type CompleteJob struct {
-	jobs   ClaimedJobs
+	jobs   JobUpdater
 	quotes QuoteWriter
 	tx     TransactionManager
 }
 
-func NewCompleteJob(jobs ClaimedJobs, quotes QuoteWriter, tx TransactionManager) *CompleteJob {
+func NewCompleteJob(jobs JobUpdater, quotes QuoteWriter, tx TransactionManager) *CompleteJob {
 	return &CompleteJob{jobs: jobs, quotes: quotes, tx: tx}
 }
 

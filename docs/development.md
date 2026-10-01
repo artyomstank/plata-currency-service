@@ -12,9 +12,9 @@ go test -race ./...
 go vet ./...
 ```
 
-`make test` запускает `go test ./...`, `make test-unit` — `go test ./internal/...`.
+`make test` запускает `go test ./...`, `make test-unit` — `go test ./internal/... ./pkg/...`.
 Обычные тесты не требуют PostgreSQL или реального Frankfurter. HTTP-тесты
-поднимают локальные httptest-серверы. Проверка форматирования: `gofmt -l cmd internal migrations`;
+поднимают локальные httptest-серверы. Проверка форматирования: `gofmt -l cmd internal pkg migrations`;
 изменённые Go-файлы форматируются через `gofmt -w`.
 
 Отдельный `golangci-lint` и target `make lint` не настроены. `go vet` —
@@ -24,7 +24,7 @@ go vet ./...
 database/user/password — `postgres`:
 
 ```bash
-go test -count=1 -tags=integration ./internal/repo
+go test -count=1 -tags=integration ./internal/repo/postgres/...
 go test -count=1 -race -tags=integration ./...
 ```
 
@@ -37,9 +37,14 @@ go test -count=1 -race -tags=integration ./...
 | --- | --- |
 | [domain](../internal/domain) | Конструкторы, нормализация валют, ID и допустимые переходы |
 | [usecase](../internal/usecase) | Сценарии, rollback, lease token, границы вызова источника, retry |
-| [transport/http](../internal/transport/http) | API, middleware, DTO, ошибки, request ID |
-| [provider/frankfurter](../internal/provider/frankfurter) | Заголовки, точность, внешний JSON, timeout и отмена |
-| [repo integration](../internal/repo/repository_integration_test.go) | Реальные транзакции, идемпотентность, rollback двух репо, reclaim и backoff |
+| [transport/http](../internal/transport/http) | Контракт API в router_test, сопоставление ошибок и JSON writer в error_test, связка Recoverer и ErrorHandler в router_recovery_test |
+| [transport/http/handler](../internal/transport/http/handler) | Формирование input, перенос request context, возврат ошибок usecase и JSON writer |
+| [provider/frankfurter](../internal/provider/frankfurter) | Внешний JSON, ACL, точность и интеграция клиента с middleware |
+| [pkg/httpclient](../pkg/httpclient) | Заголовки, логирование без тела, timeout, отмена и закрытие idle connections |
+| [pkg/httpserver/middleware](../pkg/httpserver/middleware) | Request ID, лимит тела и deadline; HTTP abort проверяется в recoverer_test, а связка Recoverer с ErrorHandler — в транспорте |
+| [pkg/postgres](../pkg/postgres) | Commit, rollback при ошибке, отмене и panic, сохранение context values, запрет вложенных транзакций |
+| [repo/postgres/job](../internal/repo/postgres/job) и [quote](../internal/repo/postgres/quote) | Обязательная транзакция при записи и блокировках, точное восстановление UUID и decimal |
+| [repo integration](../internal/repo/postgres/repository_integration_test.go) | Реальные транзакции, идемпотентность, rollback двух репо, reclaim и backoff |
 | [app lifecycle](../internal/app/lifecycle_test.go) | Drain HTTP/воркеров, дедлайн, ошибка HTTP Serve и порядок закрытия ресурсов; [описание механизма](lifecycle.md) |
 | [migrations](../migrations/embed_test.go) | Наличие непустых SQL-миграций внутри бинарника |
 

@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadServiceConfigRequiresDatabaseDSN(t *testing.T) {
@@ -47,8 +48,17 @@ func TestLoadServiceConfigHTTPSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTPAddr != ":8081" || cfg.RequestTimeout.String() != "2s" || cfg.ReadTimeout.String() != "4s" || cfg.WriteTimeout.String() != "6s" || cfg.IdleTimeout.String() != "20s" {
-		t.Fatalf("unexpected HTTP settings: addr=%s request=%s read=%s write=%s idle=%s", cfg.HTTPAddr, cfg.RequestTimeout, cfg.ReadTimeout, cfg.WriteTimeout, cfg.IdleTimeout)
+	if cfg.HTTPServer.Addr != ":8081" || cfg.HTTPTransport.RequestTimeout.String() != "2s" || cfg.HTTPServer.ReadTimeout.String() != "4s" || cfg.HTTPServer.WriteTimeout.String() != "6s" || cfg.HTTPServer.IdleTimeout.String() != "20s" {
+		t.Fatalf("unexpected HTTP settings: addr=%s request=%s read=%s write=%s idle=%s", cfg.HTTPServer.Addr, cfg.HTTPTransport.RequestTimeout, cfg.HTTPServer.ReadTimeout, cfg.HTTPServer.WriteTimeout, cfg.HTTPServer.IdleTimeout)
+	}
+	if cfg.HTTPServer.ReadHeaderTimeout != cfg.HTTPServer.ReadTimeout {
+		t.Errorf("read header timeout = %s, want %s", cfg.HTTPServer.ReadHeaderTimeout, cfg.HTTPServer.ReadTimeout)
+	}
+	if cfg.HTTPTransport.MaxBodyBytes != 1<<20 {
+		t.Errorf("max body bytes = %d, want %d", cfg.HTTPTransport.MaxBodyBytes, 1<<20)
+	}
+	if cfg.HTTPServer.MaxHeaderBytes != 1<<20 {
+		t.Errorf("max header bytes = %d, want %d", cfg.HTTPServer.MaxHeaderBytes, 1<<20)
 	}
 }
 
@@ -78,7 +88,7 @@ func TestLoadServiceConfigAllowedCurrencies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cfg.AllowedCurrencies, ","); got != "CHF,JPY" {
+	if got := strings.Join(cfg.Currencies.AllowedCurrencies, ","); got != "CHF,JPY" {
 		t.Fatalf("allowed currencies = %q, want CHF,JPY", got)
 	}
 }
@@ -106,7 +116,53 @@ func TestLoadServiceConfigDefaultCurrencies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cfg.AllowedCurrencies, ","); got != "EUR,MXN,USD" {
+	if got := strings.Join(cfg.Currencies.AllowedCurrencies, ","); got != "EUR,MXN,USD" {
 		t.Fatalf("default allowed currencies = %q", got)
+	}
+}
+
+func TestLoadServiceConfigComponentSettings(t *testing.T) {
+	for key, value := range map[string]string{
+		"DATABASE_DSN":                 "postgres://localhost:54322/postgres",
+		"DATABASE_MAX_CONNS":           "7",
+		"DATABASE_MIN_CONNS":           "2",
+		"DATABASE_HEALTH_CHECK_PERIOD": "11s",
+		"PROVIDER_BASE_URL":            "http://rates.test/api",
+		"PROVIDER_TIMEOUT":             "4s",
+		"POLL_INTERVAL":                "125ms",
+		"WORKER_COUNT":                 "2",
+		"JOB_LEASE_DURATION":           "9s",
+		"RETRY_BASE":                   "2s",
+		"RETRY_MAX":                    "7s",
+		"MAX_ATTEMPTS":                 "3",
+		"SHUTDOWN_TIMEOUT":             "15s",
+	} {
+		t.Setenv(key, value)
+	}
+	cfg, err := LoadServiceConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		got, want any
+	}{
+		{"Postgres.DSN", cfg.Postgres.DSN, "postgres://localhost:54322/postgres"},
+		{"Postgres.MaxConns", cfg.Postgres.MaxConns, int32(7)},
+		{"Postgres.MinConns", cfg.Postgres.MinConns, int32(2)},
+		{"Postgres.HealthCheckPeriod", cfg.Postgres.HealthCheckPeriod, 11 * time.Second},
+		{"Frankfurter.BaseURL", cfg.Frankfurter.BaseURL, "http://rates.test/api"},
+		{"FrankfurterHTTP.Timeout", cfg.FrankfurterHTTP.Timeout, 4 * time.Second},
+		{"Worker.PollInterval", cfg.Worker.PollInterval, 125 * time.Millisecond},
+		{"ClaimPending.LeaseDuration", cfg.ClaimPending.LeaseDuration, 9 * time.Second},
+		{"RetryJob.RetryBase", cfg.RetryJob.RetryBase, 2 * time.Second},
+		{"RetryJob.RetryMax", cfg.RetryJob.RetryMax, 7 * time.Second},
+		{"RetryJob.MaxAttempts", cfg.RetryJob.MaxAttempts, 3},
+		{"Runtime.WorkerCount", cfg.Runtime.WorkerCount, 2},
+		{"Runtime.ShutdownTimeout", cfg.Runtime.ShutdownTimeout, 15 * time.Second},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.name, tc.got, tc.want)
+		}
 	}
 }

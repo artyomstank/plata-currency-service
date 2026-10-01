@@ -13,8 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"currency-quotes/internal/config"
-	"currency-quotes/internal/repo"
 	"currency-quotes/migrations"
+	"currency-quotes/pkg/postgres"
 )
 
 const migrationLockID int64 = 7_142_016_090
@@ -30,11 +30,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := repo.NewPool(ctx, repo.PoolConfig{
-		DSN:               cfg.DatabaseDSN,
+	pool, err := postgres.NewPool(ctx, postgres.PoolConfig{
+		DSN:               cfg.Postgres.DSN,
 		MaxConns:          1,
 		MinConns:          1,
-		HealthCheckPeriod: cfg.DatabaseHealthCheckPeriod,
+		HealthCheckPeriod: cfg.Postgres.HealthCheckPeriod,
 	})
 	if err != nil {
 		log.Error("db connect failed", "err", err)

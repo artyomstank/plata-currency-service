@@ -8,17 +8,17 @@ import (
 	"currency-quotes/internal/domain"
 )
 
-type LatestQuotes interface {
+type LatestQuoteReader interface {
 	GetLatest(context.Context, string) (*domain.Quote, error)
 }
 
 type GetLatest struct {
-	quotes     LatestQuotes
+	quotes     LatestQuoteReader
 	currencies []string
 }
 
-func NewGetLatest(quotes LatestQuotes, currencies []string) *GetLatest {
-	return &GetLatest{quotes: quotes, currencies: slices.Clone(currencies)}
+func NewGetLatest(quotes LatestQuoteReader, cfg CurrencyConfig) *GetLatest {
+	return &GetLatest{quotes: quotes, currencies: slices.Clone(cfg.AllowedCurrencies)}
 }
 
 type GetLatestQuoteInput struct{ Pair string }

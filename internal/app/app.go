@@ -9,10 +9,15 @@ import (
 
 	"currency-quotes/internal/config"
 	"currency-quotes/internal/provider/frankfurter"
-	"currency-quotes/internal/repo"
+	jobrepo "currency-quotes/internal/repo/postgres/job"
+	quoterepo "currency-quotes/internal/repo/postgres/quote"
 	transporthttp "currency-quotes/internal/transport/http"
+	httphandler "currency-quotes/internal/transport/http/handler"
 	"currency-quotes/internal/usecase"
 	"currency-quotes/internal/worker"
+	"currency-quotes/pkg/httpclient"
+	"currency-quotes/pkg/httpserver"
+	"currency-quotes/pkg/postgres"
 )
 
 type application struct {
@@ -20,7 +25,7 @@ type application struct {
 	processor       worker.JobProcessor
 	log             *slog.Logger
 	workerCount     int
-	pollInterval    time.Duration
+	workerConfig    worker.Config
 	shutdownTimeout time.Duration
 	closeResources  func()
 }
@@ -38,39 +43,35 @@ func Run(ctx context.Context, log *slog.Logger) error {
 }
 
 func newApplication(ctx context.Context, cfg config.ServiceConfig, log *slog.Logger) (*application, error) {
-	pool, err := repo.NewPool(ctx, repo.PoolConfig{
-		DSN: cfg.DatabaseDSN, MaxConns: cfg.DatabaseMaxConns,
-		MinConns: cfg.DatabaseMinConns, HealthCheckPeriod: cfg.DatabaseHealthCheckPeriod,
-	})
+	pool, err := postgres.NewPool(ctx, cfg.Postgres)
 	if err != nil {
 		return nil, fmt.Errorf("connect database: %w", err)
 	}
-	sourceHTTP := frankfurter.NewHTTPClient(cfg.ProviderTimeout, log)
-	sourceClient, err := frankfurter.NewClient(cfg.ProviderBaseURL, sourceHTTP)
+	sourceHTTP := httpclient.New(cfg.FrankfurterHTTP,
+		httpclient.Logging(log, "Frankfurter HTTP request"),
+		httpclient.Headers(http.Header{"Accept": {"application/json"}, "User-Agent": {"currency-service/frankfurter"}}),
+	)
+	sourceClient, err := frankfurter.NewClient(cfg.Frankfurter, sourceHTTP)
 	if err != nil {
 		sourceHTTP.CloseIdleConnections()
 		pool.Close()
 		return nil, err
 	}
 	source := frankfurter.NewAdapter(sourceClient)
-	jobs, quotes := repo.NewJobsRepo(pool), repo.NewQuotesRepo(pool)
-	tx := repo.NewTransactionManager(pool)
-	claim := usecase.NewClaimPending(jobs, tx, cfg.JobLeaseDuration)
+	jobs, quotes := jobrepo.New(pool), quoterepo.New(pool)
+	tx := postgres.NewTransactionManager(pool)
+	claim := usecase.NewClaimPending(jobs, tx, cfg.ClaimPending)
 	complete := usecase.NewCompleteJob(jobs, quotes, tx)
-	retry := usecase.NewRetryJob(jobs, tx, usecase.RetryConfig{MaxAttempts: cfg.MaxAttempts, RetryBase: cfg.RetryBase, RetryMax: cfg.RetryMax})
-	scenarios := &transporthttp.UseCases{
-		RequestUpdate: usecase.NewRequestUpdate(jobs, tx, cfg.AllowedCurrencies),
+	retry := usecase.NewRetryJob(jobs, tx, cfg.RetryJob)
+	scenarios := &httphandler.UseCases{
+		RequestUpdate: usecase.NewRequestUpdate(jobs, tx, cfg.Currencies),
 		GetJobResult:  usecase.NewGetJobResult(jobs, quotes, tx),
-		GetLatest:     usecase.NewGetLatest(quotes, cfg.AllowedCurrencies),
+		GetLatest:     usecase.NewGetLatest(quotes, cfg.Currencies),
 	}
 	return &application{
-		server: &http.Server{
-			Addr: cfg.HTTPAddr, Handler: transporthttp.New(scenarios, log, pool.Ping, cfg.RequestTimeout),
-			ReadHeaderTimeout: cfg.ReadTimeout, ReadTimeout: cfg.ReadTimeout,
-			WriteTimeout: cfg.WriteTimeout, IdleTimeout: cfg.IdleTimeout, MaxHeaderBytes: 1 << 20,
-		},
+		server:    httpserver.New(cfg.HTTPServer, transporthttp.New(scenarios, log, pool.Ping, cfg.HTTPTransport)),
 		processor: usecase.NewProcessNext(claim, complete, retry, source), log: log,
-		workerCount: cfg.WorkerCount, pollInterval: cfg.PollInterval, shutdownTimeout: cfg.ShutdownTimeout,
+		workerCount: cfg.Runtime.WorkerCount, workerConfig: cfg.Worker, shutdownTimeout: cfg.Runtime.ShutdownTimeout,
 		closeResources: func() { sourceHTTP.CloseIdleConnections(); pool.Close() },
 	}, nil
 }

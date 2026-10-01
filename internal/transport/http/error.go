@@ -10,15 +10,22 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
 	"currency-quotes/internal/domain"
+	"currency-quotes/internal/transport/http/handler"
 	"currency-quotes/internal/usecase"
+	"currency-quotes/pkg/httpserver/middleware"
 )
 
 var (
-	errInvalidJSON      = errors.New("invalid JSON request body")
 	errRouteNotFound    = errors.New("route not found")
 	errMethodNotAllowed = errors.New("method not allowed")
 	errPanic            = errors.New("HTTP handler panic")
 )
+
+type errorResponse struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"requestId,omitempty"`
+}
 
 type handlerFunc func(http.ResponseWriter, *http.Request) error
 
@@ -40,7 +47,7 @@ func (h *ErrorHandler) Handle(w http.ResponseWriter, r *http.Request, err error)
 	switch {
 	case errors.As(err, &tooLarge):
 		status, code, message = http.StatusRequestEntityTooLarge, "INVALID_ARGUMENT", "request body is too large"
-	case errors.Is(err, errInvalidJSON):
+	case errors.Is(err, handler.ErrInvalidJSON):
 		status, code, message = http.StatusBadRequest, "INVALID_ARGUMENT", "invalid JSON request body"
 	case errors.Is(err, domain.ErrInvalidJobID):
 		status, code, message = http.StatusBadRequest, "INVALID_ARGUMENT", "invalid job_id"
@@ -87,7 +94,7 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, value any) er
 }
 
 func responseRequestID(w http.ResponseWriter, r *http.Request) string {
-	if id := requestIDFromContext(r.Context()); id != "" {
+	if id := middleware.RequestIDFromContext(r.Context()); id != "" {
 		return id
 	}
 	return w.Header().Get("X-Request-ID")

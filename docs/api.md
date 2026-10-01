@@ -173,5 +173,6 @@ Readiness не проверяет наличие всех таблиц, дост
 а не общий JSON ошибок из таблицы выше.
 
 Реализация: [router.go](../internal/transport/http/router.go),
-[handler.go](../internal/transport/http/handler.go), [dto.go](../internal/transport/http/dto.go),
+[handler.go](../internal/transport/http/handler/handler.go),
+[dto.go](../internal/transport/http/handler/dto.go), [converter.go](../internal/transport/http/handler/converter.go),
 [error.go](../internal/transport/http/error.go).

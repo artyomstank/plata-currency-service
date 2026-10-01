@@ -1,4 +1,4 @@
-package http
+package handler
 
 import (
 	"time"
@@ -6,39 +6,6 @@ import (
 	"currency-quotes/internal/domain"
 	"currency-quotes/internal/usecase"
 )
-
-type updateRequest struct {
-	Pair string `json:"pair"`
-}
-
-type updateResponse struct {
-	JobID  string `json:"jobId"`
-	Status string `json:"status"`
-}
-
-type jobResponse struct {
-	updateResponse
-	Pair         string  `json:"pair"`
-	Price        *string `json:"price,omitempty"`
-	UpdatedAt    *string `json:"updatedAt,omitempty"`
-	ErrorMessage *string `json:"errorMessage,omitempty"`
-}
-
-type latestResponse struct {
-	Pair      string `json:"pair"`
-	Price     string `json:"price"`
-	UpdatedAt string `json:"updatedAt"`
-}
-
-type healthResponse struct {
-	Status string `json:"status"`
-}
-
-type errorResponse struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"requestId,omitempty"`
-}
 
 func toRequestUpdateInput(request updateRequest, idempotencyKey string) usecase.RequestQuoteUpdateInput {
 	return usecase.RequestQuoteUpdateInput{Pair: request.Pair, IdempotencyKey: idempotencyKey}

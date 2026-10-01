@@ -8,18 +8,22 @@ import (
 	"currency-quotes/internal/domain"
 )
 
-type UpdateJobs interface {
+type JobCreator interface {
 	Create(context.Context, *domain.Job) (*domain.Job, bool, error)
 }
 
+type CurrencyConfig struct {
+	AllowedCurrencies []string
+}
+
 type RequestUpdate struct {
-	jobs       UpdateJobs
+	jobs       JobCreator
 	tx         TransactionManager
 	currencies []string
 }
 
-func NewRequestUpdate(jobs UpdateJobs, tx TransactionManager, currencies []string) *RequestUpdate {
-	return &RequestUpdate{jobs: jobs, tx: tx, currencies: slices.Clone(currencies)}
+func NewRequestUpdate(jobs JobCreator, tx TransactionManager, cfg CurrencyConfig) *RequestUpdate {
+	return &RequestUpdate{jobs: jobs, tx: tx, currencies: slices.Clone(cfg.AllowedCurrencies)}
 }
 
 type RequestQuoteUpdateInput struct {

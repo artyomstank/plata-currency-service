@@ -68,4 +68,4 @@ func directTransaction() TransactionManager {
 	return transactionFunc(func(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) })
 }
 
-var testCurrencies = []string{"EUR", "MXN", "USD"}
+var testCurrencies = CurrencyConfig{AllowedCurrencies: []string{"EUR", "MXN", "USD"}}

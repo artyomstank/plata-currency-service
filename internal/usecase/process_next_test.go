@@ -118,7 +118,7 @@ func newJobFixture(t *testing.T) *jobFixture {
 			return f.stagedQuote, nil
 		},
 	}
-	f.claim = NewClaimPending(jobs, tx, 30*time.Second)
+	f.claim = NewClaimPending(jobs, tx, ClaimPendingConfig{LeaseDuration: 30 * time.Second})
 	f.complete = NewCompleteJob(jobs, quotes, tx)
 	f.retry = NewRetryJob(jobs, tx, RetryConfig{MaxAttempts: 5, RetryBase: time.Second, RetryMax: 30 * time.Second})
 	f.process = NewProcessNext(f.claim, f.complete, f.retry, nil)
@@ -175,7 +175,7 @@ func TestCompleteJobPersistsBothEntitiesAndReadsResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewGetLatest(quotesStub{}, []string{"CHF", "JPY"}).Execute(context.Background(), GetLatestQuoteInput{Pair: job.Pair}); !errors.Is(err, domain.ErrInvalidPair) {
+	if _, err := NewGetLatest(quotesStub{}, CurrencyConfig{AllowedCurrencies: []string{"CHF", "JPY"}}).Execute(context.Background(), GetLatestQuoteInput{Pair: job.Pair}); !errors.Is(err, domain.ErrInvalidPair) {
 		t.Fatalf("admission list was not changed: %v", err)
 	}
 	if err := f.complete.Execute(context.Background(), completionInput(job)); err != nil {

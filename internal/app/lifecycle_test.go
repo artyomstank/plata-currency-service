@@ -57,7 +57,7 @@ func startTestApplication(t *testing.T, processor worker.JobProcessor, handler h
 	a := &application{
 		server: &http.Server{Handler: handler}, processor: processor,
 		log: logger, workerCount: count,
-		pollInterval: time.Millisecond, shutdownTimeout: timeout, closeResources: cleanup,
+		workerConfig: worker.Config{PollInterval: time.Millisecond}, shutdownTimeout: timeout, closeResources: cleanup,
 	}
 	done := make(chan error, 1)
 	go func() { done <- a.serve(ctx, watched) }()

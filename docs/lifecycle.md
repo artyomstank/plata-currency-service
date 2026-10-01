@@ -15,13 +15,17 @@ HTTP и воркеров, обработка причины остановки �
 | [cmd/service/main.go](../cmd/service/main.go) | Логгер, `signal.NotifyContext` для SIGINT/SIGTERM, вызов app.Run, exit code при ошибке |
 | [internal/app/app.go](../internal/app/app.go) | Загрузка конфига и создание пула, адаптеров, сценариев и HTTP server |
 | [internal/app/lifecycle.go](../internal/app/lifecycle.go) | Listener, запуск горутин, остановка опроса, drain, отмена и закрытие ресурсов |
+| [pkg/postgres/pool.go](../pkg/postgres/pool.go) | Создание пула и проверка подключения; закрывает его app |
+| [pkg/httpclient/client.go](../pkg/httpclient/client.go) | Создание HTTP client с собственным transport и middleware |
+| [pkg/httpserver/server.go](../pkg/httpserver/server.go) | Создание стандартного HTTP server с переданным handler и настройками |
 | [worker.go](../internal/worker/worker.go) | Один цикл опроса; стоп опроса отдельно от отмены активной попытки |
-| [repo/transaction.go](../internal/repo/transaction.go) | Жизнь одной SQL-транзакции и rollback при завершении сценария |
+| [pkg/postgres/transaction.go](../pkg/postgres/transaction.go) | Жизнь одной SQL-транзакции и rollback при завершении сценария |
 
 Пул PostgreSQL и исходящий HTTP transport принадлежат приложению и
 закрываются через `closeResources`. Usecase не закрывает их после каждого
 вызова. Migrator запускается отдельным процессом и не является горутиной
-service.
+service. Общие конструкторы вынесены в `pkg`, но listener, BaseContext,
+запуск и порядок graceful shutdown остаются в `internal/app/lifecycle.go`.
 
 <a id="startup"></a>
 

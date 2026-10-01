@@ -16,13 +16,17 @@ type httpDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+type ClientConfig struct {
+	BaseURL string
+}
+
 type Client struct {
 	endpoint *url.URL
 	http     httpDoer
 }
 
-func NewClient(baseURL string, httpClient httpDoer) (*Client, error) {
-	endpoint, err := url.Parse(strings.TrimRight(baseURL, "/") + "/latest")
+func NewClient(cfg ClientConfig, httpClient httpDoer) (*Client, error) {
+	endpoint, err := url.Parse(strings.TrimRight(cfg.BaseURL, "/") + "/latest")
 	if err != nil {
 		return nil, fmt.Errorf("parse Frankfurter URL: %w", err)
 	}

@@ -32,7 +32,7 @@ func TestAdapterFetchRate(t *testing.T) {
 		}, nil
 	})
 
-	client, err := NewClient("https://rates.test", httpClient)
+	client, err := NewClient(ClientConfig{BaseURL: "https://rates.test"}, httpClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestAdapterRejectsNonSuccessStatus(t *testing.T) {
 		}, nil
 	})
 
-	client, err := NewClient("https://rates.test", httpClient)
+	client, err := NewClient(ClientConfig{BaseURL: "https://rates.test"}, httpClient)
 	if err != nil {
 		t.Fatal(err)
 	}

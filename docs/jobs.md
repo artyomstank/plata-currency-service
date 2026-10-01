@@ -54,7 +54,7 @@ sequenceDiagram
 ```
 
 Границы транзакций определяет usecase через `TransactionManager`.
-Реализация в [repo/transaction.go](../internal/repo/transaction.go) открывает
+Реализация в [pkg/postgres/transaction.go](../pkg/postgres/transaction.go) открывает
 `pgx.Tx` и передаёт его через приватный ключ контекста. Оба репозитория
 используют один tx. Ошибка callback или panic приводит к rollback; ошибка
 commit также возвращается вызывающему коду. Вложенные транзакции запрещены.
@@ -67,7 +67,8 @@ timeout. SQL-модификации и блокировки требуют tx; �
 Complete сохраняет статус Job и Quote атомарно. Если вставка цены не проходит,
 обновление Job также откатывается. Уникальный индекс по `quote_values.job_id`
 не допускает две котировки одной джобы. Схема и конвертеры находятся в
-[JobsRepo](../internal/repo/jobs_repo.go), [QuotesRepo](../internal/repo/quotes_repo.go)
+[job.Repository](../internal/repo/postgres/job/repository.go),
+[quote.Repository](../internal/repo/postgres/quote/repository.go)
 и [миграциях](../migrations).
 
 <a id="lease"></a>
