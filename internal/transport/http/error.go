@@ -51,10 +51,8 @@ func (h *ErrorHandler) Handle(w http.ResponseWriter, r *http.Request, err error)
 		status, code, message = http.StatusBadRequest, "INVALID_ARGUMENT", "invalid JSON request body"
 	case errors.Is(err, domain.ErrInvalidJobID):
 		status, code, message = http.StatusBadRequest, "INVALID_ARGUMENT", "invalid job_id"
-	case errors.Is(err, domain.ErrInvalidPair), errors.Is(err, domain.ErrInvalidIdempotency), errors.Is(err, usecase.ErrInvalidIdempotency):
+	case errors.Is(err, domain.ErrInvalidPair), errors.Is(err, middleware.ErrInvalidIdempotencyKey):
 		status, code, message = http.StatusBadRequest, "INVALID_ARGUMENT", err.Error()
-	case errors.Is(err, usecase.ErrIdempotencyConflict):
-		status, code, message = http.StatusConflict, "IDEMPOTENCY_CONFLICT", err.Error()
 	case errors.Is(err, usecase.ErrJobNotFound):
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "job not found"
 	case errors.Is(err, usecase.ErrQuoteNotFound):

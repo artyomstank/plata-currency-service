@@ -85,7 +85,7 @@ func TestConfiguredCurrenciesApplyToJobsAndQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := NewJob(" chf/jpy ", "", currencies)
+	job, err := NewJob(" chf/jpy ", currencies)
 	if err != nil || job.Pair != "CHF/JPY" {
 		t.Fatalf("configured job = %v, error = %v", job, err)
 	}
@@ -93,13 +93,13 @@ func TestConfiguredCurrenciesApplyToJobsAndQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := job.Start(); err != nil {
+	if err := job.Start(testLeaseUntil); err != nil {
 		t.Fatal(err)
 	}
 	if err := job.Complete(quote); err != nil {
 		t.Fatalf("complete configured pair: %v", err)
 	}
-	if _, err := NewJob("EUR/USD", "", currencies); !errors.Is(err, ErrInvalidPair) {
+	if _, err := NewJob("EUR/USD", currencies); !errors.Is(err, ErrInvalidPair) {
 		t.Fatalf("unconfigured job pair error = %v", err)
 	}
 	if _, err := NewQuote(job.ID, "EUR/USD", decimal.NewFromInt(1), time.Now(), currencies); !errors.Is(err, ErrInvalidPair) {

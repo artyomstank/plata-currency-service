@@ -14,6 +14,7 @@
 - Разрабатывать и проверять изменения: [разработка](development.md).
 - Понять причины выбора архитектуры: [решения и trade-offs](trade-offs.md).
 - Разобраться в остановке процесса: [lifecycle](lifecycle.md).
+- Разобраться в доработках надёжности: [идемпотентность, джобы и stateless](reliability.md).
 
 ## Карта разделов
 
@@ -22,6 +23,8 @@
 | [Архитектура](architecture.md) | [Границы](architecture.md#boundaries), [сценарии](architecture.md#scenarios), [контекст](architecture.md#context), [конвертеры](architecture.md#converters) |
 | [Домен](domain.md) | [Job](domain.md#job), [статусы](domain.md#transitions), [Quote](domain.md#quote), [правила валют](domain.md#currencies) |
 | [API](api.md) | [Создание](api.md#create), [результат](api.md#result), [latest](api.md#latest), [ошибки](api.md#errors), [идемпотентность](api.md#idempotency) |
+| [HTTP-идемпотентность](idempotency.md) | [Контракт](idempotency.md#contract), [транзакция](idempotency.md#transaction), [таблица и миграция](idempotency.md#storage), [границы](idempotency.md#limits) |
+| [Идемпотентность, джобы и stateless](reliability.md) | [Изменения](reliability.md#changes), [HTTP](reliability.md#idempotency), [job](reliability.md#jobs), [stateless](reliability.md#stateless), [гарантии](reliability.md#guarantees), [миграции](reliability.md#migrations), [проверки](reliability.md#checks) |
 | [Запуск](running.md) | [Docker](running.md#docker), [хост](running.md#host), [остановка](running.md#stop), [диагностика](running.md#troubleshooting) |
 | [Конфигурация](configuration.md) | [Валюты](configuration.md#currencies), [ENV в Compose](configuration.md#compose), [переменные](configuration.md#variables) |
 | [Провайдер](provider.md) | [Выбор Frankfurter](provider.md#choice), [HTTP-клиент и ACL](provider.md#adapter), [ошибки](provider.md#failures), [замена](provider.md#replacement) |

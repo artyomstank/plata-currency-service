@@ -7,26 +7,26 @@ import (
 )
 
 type jobsStub struct {
-	create    func(context.Context, string, string) (*domain.Job, bool, error)
-	createJob func(context.Context, *domain.Job) (*domain.Job, bool, error)
+	create    func(context.Context, string) (*domain.Job, error)
+	createJob func(context.Context, *domain.Job) (*domain.Job, error)
 	get       func(context.Context, domain.JobID) (*domain.Job, error)
 	lock      func(context.Context) (*domain.Job, error)
 	getLocked func(context.Context, domain.JobID) (*domain.Job, error)
-	save      func(context.Context, *domain.Job, JobUpdate) error
+	save      func(context.Context, *domain.Job, int) error
 }
 
-func (s jobsStub) Create(ctx context.Context, job *domain.Job) (*domain.Job, bool, error) {
+func (s jobsStub) Create(ctx context.Context, job *domain.Job) (*domain.Job, error) {
 	if s.createJob != nil {
 		return s.createJob(ctx, job)
 	}
-	return s.create(ctx, job.Pair, job.IdempotencyKey)
+	return s.create(ctx, job.Pair)
 }
 func (s jobsStub) LockNextAvailable(ctx context.Context) (*domain.Job, error) { return s.lock(ctx) }
 func (s jobsStub) GetByIDForUpdate(ctx context.Context, id domain.JobID) (*domain.Job, error) {
 	return s.getLocked(ctx, id)
 }
-func (s jobsStub) Save(ctx context.Context, job *domain.Job, update JobUpdate) error {
-	return s.save(ctx, job, update)
+func (s jobsStub) Save(ctx context.Context, job *domain.Job, expectedAttempt int) error {
+	return s.save(ctx, job, expectedAttempt)
 }
 
 func (s jobsStub) GetByID(ctx context.Context, id domain.JobID) (*domain.Job, error) {

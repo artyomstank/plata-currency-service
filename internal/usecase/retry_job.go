@@ -4,8 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/google/uuid"
-
 	"currency-quotes/internal/domain"
 )
 
@@ -28,8 +26,8 @@ func NewRetryJob(jobs JobUpdater, tx TransactionManager, config RetryConfig) *Re
 }
 
 type RetryJobInput struct {
-	JobID      domain.JobID
-	LeaseToken uuid.UUID
+	JobID           domain.JobID
+	ExpectedAttempt int
 }
 
 func (uc *RetryJob) Execute(ctx context.Context, input RetryJobInput) error {
@@ -38,22 +36,19 @@ func (uc *RetryJob) Execute(ctx context.Context, input RetryJobInput) error {
 
 func (uc *RetryJob) releaseJob(ctx context.Context, input RetryJobInput, permanent bool, publicMessage string) error {
 	return uc.tx.WithinTransaction(ctx, func(txCtx context.Context) error {
-		job, err := loadClaim(txCtx, uc.jobs, input.JobID, input.LeaseToken)
+		job, err := loadClaim(txCtx, uc.jobs, input.JobID, input.ExpectedAttempt)
 		if err != nil {
 			return err
 		}
 		if permanent {
 			err = job.Fail(publicMessage)
 		} else {
-			err = job.RetryOrFail(uc.config.MaxAttempts, publicMessage)
+			err = job.RetryOrFail(uc.config.MaxAttempts, publicMessage, uc.now().Add(uc.retryDelay(job.Attempts)))
 		}
 		if err != nil {
 			return err
 		}
-		return uc.jobs.Save(txCtx, job, JobUpdate{
-			ExpectedLeaseToken: input.LeaseToken,
-			NextAttemptAt:      uc.now().Add(uc.retryDelay(job.Attempts)),
-		})
+		return uc.jobs.Save(txCtx, job, input.ExpectedAttempt)
 	})
 }
 

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"currency-quotes/internal/domain"
@@ -27,15 +26,15 @@ func NewCompleteJob(jobs JobUpdater, quotes QuoteWriter, tx TransactionManager) 
 }
 
 type CompleteJobInput struct {
-	JobID      domain.JobID
-	LeaseToken uuid.UUID
-	Price      decimal.Decimal
-	SourceTime time.Time
+	JobID           domain.JobID
+	ExpectedAttempt int
+	Price           decimal.Decimal
+	SourceTime      time.Time
 }
 
 func (uc *CompleteJob) Execute(ctx context.Context, input CompleteJobInput) error {
 	return uc.tx.WithinTransaction(ctx, func(txCtx context.Context) error {
-		job, err := loadClaim(txCtx, uc.jobs, input.JobID, input.LeaseToken)
+		job, err := loadClaim(txCtx, uc.jobs, input.JobID, input.ExpectedAttempt)
 		if err != nil {
 			return err
 		}
@@ -46,7 +45,7 @@ func (uc *CompleteJob) Execute(ctx context.Context, input CompleteJobInput) erro
 		if err := job.Complete(quote); err != nil {
 			return err
 		}
-		if err := uc.jobs.Save(txCtx, job, JobUpdate{ExpectedLeaseToken: input.LeaseToken}); err != nil {
+		if err := uc.jobs.Save(txCtx, job, input.ExpectedAttempt); err != nil {
 			return fmt.Errorf("save completed job: %w", err)
 		}
 		if err := uc.quotes.Save(txCtx, quote); err != nil {

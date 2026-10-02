@@ -34,17 +34,17 @@ func (uc *ProcessNext) Execute(ctx context.Context) (bool, error) {
 	}
 	base, quote, _ := strings.Cut(job.Pair, "/")
 	if _, err := domain.NormalizePair(job.Pair, []string{base, quote}); err != nil {
-		releaseErr := uc.retry.releaseJob(ctx, RetryJobInput{job.ID, job.LeaseToken}, true, "stored currency pair is invalid")
+		releaseErr := uc.retry.releaseJob(ctx, RetryJobInput{job.ID, job.Attempts}, true, "stored currency pair is invalid")
 		return true, errors.Join(err, releaseErr)
 	}
 	price, sourceTime, err := uc.provider.FetchRate(ctx, base, quote)
 	if err != nil {
-		retryErr := uc.retry.Execute(ctx, RetryJobInput{job.ID, job.LeaseToken})
+		retryErr := uc.retry.Execute(ctx, RetryJobInput{job.ID, job.Attempts})
 		return true, errors.Join(fmt.Errorf("fetch rate for job %s: %w", job.ID, err), retryErr)
 	}
-	err = uc.complete.Execute(ctx, CompleteJobInput{job.ID, job.LeaseToken, price, sourceTime})
+	err = uc.complete.Execute(ctx, CompleteJobInput{job.ID, job.Attempts, price, sourceTime})
 	if errors.Is(err, domain.ErrInvalidQuote) || errors.Is(err, domain.ErrInvalidPair) {
-		err = errors.Join(err, uc.retry.Execute(ctx, RetryJobInput{job.ID, job.LeaseToken}))
+		err = errors.Join(err, uc.retry.Execute(ctx, RetryJobInput{job.ID, job.Attempts}))
 	}
 	if err != nil {
 		return true, fmt.Errorf("complete job %s: %w", job.ID, err)

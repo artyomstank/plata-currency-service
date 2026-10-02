@@ -36,15 +36,16 @@ go test -count=1 -race -tags=integration ./...
 | Область | Что проверяется |
 | --- | --- |
 | [domain](../internal/domain) | Конструкторы, нормализация валют, ID и допустимые переходы |
-| [usecase](../internal/usecase) | Сценарии, rollback, lease token, границы вызова источника, retry |
+| [usecase](../internal/usecase) | Сценарии, rollback, номер попытки, границы вызова источника, retry |
 | [transport/http](../internal/transport/http) | Контракт API в router_test, сопоставление ошибок и JSON writer в error_test, связка Recoverer и ErrorHandler в router_recovery_test |
 | [transport/http/handler](../internal/transport/http/handler) | Формирование input, перенос request context, возврат ошибок usecase и JSON writer |
 | [provider/frankfurter](../internal/provider/frankfurter) | Внешний JSON, ACL, точность и интеграция клиента с middleware |
 | [pkg/httpclient](../pkg/httpclient) | Заголовки, логирование без тела, timeout, отмена и закрытие idle connections |
-| [pkg/httpserver/middleware](../pkg/httpserver/middleware) | Request ID, лимит тела и deadline; HTTP abort проверяется в recoverer_test, а связка Recoverer с ErrorHandler — в транспорте |
-| [pkg/postgres](../pkg/postgres) | Commit, rollback при ошибке, отмене и panic, сохранение context values, запрет вложенных транзакций |
+| [pkg/httpserver/middleware](../pkg/httpserver/middleware) | Request ID, лимит тела, deadline, повтор исходного HTTP-ответа и отсутствие успешного ответа до commit |
+| [pkg/postgres](../pkg/postgres) | Commit, rollback при ошибке, отмене и panic, сохранение context values, использование существующей транзакции |
 | [repo/postgres/job](../internal/repo/postgres/job) и [quote](../internal/repo/postgres/quote) | Обязательная транзакция при записи и блокировках, точное восстановление UUID и decimal |
-| [repo integration](../internal/repo/postgres/repository_integration_test.go) | Реальные транзакции, идемпотентность, rollback двух репо, reclaim и backoff |
+| [repo integration](../internal/repo/postgres/repository_integration_test.go) | Реальные транзакции, rollback двух репо, reclaim и backoff |
+| [HTTP idempotency integration](../internal/repo/postgres/idempotency_integration_test.go) | Сохранённый ответ, откат Job и ключа при ошибке/panic/отмене, перенос существующих ключей и обратная миграция |
 | [app lifecycle](../internal/app/lifecycle_test.go) | Drain HTTP/воркеров, дедлайн, ошибка HTTP Serve и порядок закрытия ресурсов; [описание механизма](lifecycle.md) |
 | [migrations](../migrations/embed_test.go) | Наличие непустых SQL-миграций внутри бинарника |
 
@@ -76,7 +77,22 @@ docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml build m
 docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml run --rm --no-deps migrate
 ```
 
-В БД записи версии хранятся без `.up.sql`, например `0002_job_reliability`.
+Миграция [0003_attempt_claim.up.sql](../migrations/0003_attempt_claim.up.sql)
+удаляет `lease_token`: владение теперь проверяется по `Attempts`. Перед
+обновлением остановите все старые экземпляры сервиса, примените миграцию
+и запустите новый код. Одновременно запускать обработчики старого и нового
+протоколов нельзя. Статусы, сроки аренды, счётчики и котировки сохраняются.
+Обратная миграция восстанавливает колонку, но не прежние UUID-токены.
+
+Миграция [0004_http_idempotency.up.sql](../migrations/0004_http_idempotency.up.sql)
+создаёт `http_idempotency`, переносит существующие ключи с восстановленным
+исходным ответом 202/pending и удаляет `idempotency_key` из `quote_jobs`.
+Перед обновлением остановите старые экземпляры сервиса. Повтор POST теперь
+возвращает исходный 202 и тело; 200 с текущим статусом и конфликт пары по ключу
+больше не используются. Down-миграция возвращает ключи существующим джобам,
+а сохранённые HTTP-ответы удаляет. Подробности — [идемпотентность](idempotency.md).
+
+В БД записи версии хранятся без `.up.sql`, например `0003_attempt_claim`.
 Проверять их следует на локальном инстансе. Команда не выполняет автоматический
 rollback; `.down.sql` предназначены для отдельного ручного отката после
 оценки последствий.
@@ -106,7 +122,7 @@ SQL встроен в бинарник директивой `//go:embed *.up.sql
 ## Ручная проверка в Docker
 
 После [запуска](running.md#docker) проверьте POST → статус джобы → latest,
-повтор с одинаковым ключом, конфликт ключа, невалидный JSON и валютную пару.
+повтор исходного ответа с одинаковым ключом, невалидный JSON и валютную пару.
 Для ошибок источника, timeout и shutdown используйте контролируемый локальный
 Frankfurter-compatible endpoint через Compose override.
 

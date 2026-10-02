@@ -8,7 +8,7 @@ import (
 )
 
 type RequestUpdateUseCase interface {
-	Execute(context.Context, usecase.RequestQuoteUpdateInput) (*usecase.RequestUpdateResult, error)
+	Execute(context.Context, usecase.RequestQuoteUpdateInput) (*domain.Job, error)
 }
 
 type GetJobResultUseCase interface {

@@ -30,16 +30,12 @@ func (h *Handler) RequestUpdate(w http.ResponseWriter, r *http.Request) error {
 	if err := decodeJSON(r, &request); err != nil {
 		return err
 	}
-	input := toRequestUpdateInput(request, r.Header.Get("Idempotency-Key"))
+	input := toRequestUpdateInput(request)
 	result, err := h.uc.RequestUpdate.Execute(r.Context(), input)
 	if err != nil {
 		return err
 	}
-	status := http.StatusOK
-	if result.Created {
-		status = http.StatusAccepted
-	}
-	return h.writeJSON(w, r, status, toUpdateResponse(result))
+	return h.writeJSON(w, r, http.StatusAccepted, toUpdateResponse(result))
 }
 
 func (h *Handler) GetUpdate(w http.ResponseWriter, r *http.Request) error {

@@ -26,7 +26,7 @@ func NewTransactionManager(pool *pgxpool.Pool) *TransactionManager {
 
 func (m *TransactionManager) WithinTransaction(ctx context.Context, fn func(context.Context) error) (err error) {
 	if _, ok := TransactionFromContext(ctx); ok {
-		return errors.New("nested transactions are not supported")
+		return fn(ctx)
 	}
 	tx, err := m.pool.Begin(ctx)
 	if err != nil {

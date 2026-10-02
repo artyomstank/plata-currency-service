@@ -18,7 +18,7 @@ type Config struct {
 	MaxBodyBytes   int64
 }
 
-func New(uc *handler.UseCases, log *slog.Logger, ready func(context.Context) error, cfg Config) http.Handler {
+func New(uc *handler.UseCases, log *slog.Logger, ready func(context.Context) error, cfg Config, store middleware.IdempotencyStore, tx middleware.TransactionManager) http.Handler {
 	h := handler.New(uc, log, ready, writeJSON)
 	errors := &ErrorHandler{log: log}
 	router := chi.NewRouter()
@@ -30,7 +30,7 @@ func New(uc *handler.UseCases, log *slog.Logger, ready func(context.Context) err
 		middleware.BodyLimit(cfg.MaxBodyBytes),
 	)
 
-	router.Post("/v1/quote-updates", errors.Adapt(h.RequestUpdate))
+	router.With(middleware.Idempotency(store, tx, errors.Handle)).Post("/v1/quote-updates", errors.Adapt(h.RequestUpdate))
 	router.Get("/v1/quote-updates/{job_id}", errors.Adapt(h.GetUpdate))
 	router.Head("/v1/quote-updates/{job_id}", errors.Adapt(h.GetUpdate))
 	router.Get("/v1/quotes/latest", errors.Adapt(h.GetLatest))

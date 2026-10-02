@@ -15,9 +15,9 @@ import (
 	"currency-quotes/pkg/httpserver/middleware"
 )
 
-type requestUpdateFunc func(context.Context, usecase.RequestQuoteUpdateInput) (*usecase.RequestUpdateResult, error)
+type requestUpdateFunc func(context.Context, usecase.RequestQuoteUpdateInput) (*domain.Job, error)
 
-func (fn requestUpdateFunc) Execute(ctx context.Context, input usecase.RequestQuoteUpdateInput) (*usecase.RequestUpdateResult, error) {
+func (fn requestUpdateFunc) Execute(ctx context.Context, input usecase.RequestQuoteUpdateInput) (*domain.Job, error) {
 	return fn(ctx, input)
 }
 
@@ -26,14 +26,14 @@ func TestRequestUpdatePreservesInputContextAndErrors(t *testing.T) {
 	for _, failUseCase := range []bool{true, false} {
 		t.Run(map[bool]string{true: "usecase error", false: "response writer error"}[failUseCase], func(t *testing.T) {
 			jobID := domain.NewJobID()
-			scenarios := &UseCases{RequestUpdate: requestUpdateFunc(func(ctx context.Context, input usecase.RequestQuoteUpdateInput) (*usecase.RequestUpdateResult, error) {
-				if input.Pair != "eur/mxn" || input.IdempotencyKey != "key-1" || middleware.RequestIDFromContext(ctx) != "request-1" {
+			scenarios := &UseCases{RequestUpdate: requestUpdateFunc(func(ctx context.Context, input usecase.RequestQuoteUpdateInput) (*domain.Job, error) {
+				if input.Pair != "eur/mxn" || middleware.RequestIDFromContext(ctx) != "request-1" {
 					t.Fatalf("input = %+v, request ID = %q", input, middleware.RequestIDFromContext(ctx))
 				}
 				if failUseCase {
 					return nil, failure
 				}
-				return &usecase.RequestUpdateResult{Job: &domain.Job{ID: jobID, Status: domain.JobStatusPending}, Created: true}, nil
+				return &domain.Job{ID: jobID, Status: domain.JobStatusPending}, nil
 			})}
 			wrote := false
 			h := New(scenarios, slog.New(slog.NewTextHandler(io.Discard, nil)), nil,

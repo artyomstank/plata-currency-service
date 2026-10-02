@@ -93,13 +93,36 @@ func TestTransactionManagerRollsBackAndPreservesPanic(t *testing.T) {
 	_ = manager.WithinTransaction(context.Background(), func(context.Context) error { panic("handler panic") })
 }
 
-func TestTransactionManagerRejectsNestedTransactions(t *testing.T) {
+func TestTransactionManagerReusesExistingTransaction(t *testing.T) {
 	tx := &transactionStub{}
 	manager := &TransactionManager{pool: beginnerStub{tx: tx}}
 	err := manager.WithinTransaction(context.Background(), func(ctx context.Context) error {
-		return manager.WithinTransaction(ctx, func(context.Context) error { t.Fatal("nested transaction callback executed"); return nil })
+		if err := manager.WithinTransaction(ctx, func(inner context.Context) error {
+			if got, ok := TransactionFromContext(inner); !ok || got != tx {
+				t.Fatal("existing transaction was not reused")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if tx.committed || tx.rolledBack {
+			t.Fatal("inner operation ended the outer transaction")
+		}
+		return nil
 	})
-	if err == nil || tx.committed || !tx.rolledBack {
+	if err != nil || !tx.committed {
+		t.Fatalf("err=%v committed=%v rollback=%v", err, tx.committed, tx.rolledBack)
+	}
+}
+
+func TestTransactionManagerRollsBackWhenJoinedOperationFails(t *testing.T) {
+	tx := &transactionStub{}
+	manager := &TransactionManager{pool: beginnerStub{tx: tx}}
+	failure := errors.New("joined operation failed")
+	err := manager.WithinTransaction(context.Background(), func(ctx context.Context) error {
+		return manager.WithinTransaction(ctx, func(context.Context) error { return failure })
+	})
+	if !errors.Is(err, failure) || tx.committed || !tx.rolledBack {
 		t.Fatalf("err=%v committed=%v rollback=%v", err, tx.committed, tx.rolledBack)
 	}
 }

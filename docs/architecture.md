@@ -39,6 +39,11 @@ flowchart LR
     App -.-> Worker["worker<br/>опрос очереди"]
     Worker -->|ProcessNext.Execute| UC["usecase<br/>отдельные сценарии"]
     HTTP -->|Execute: input + context| UC
+    HTTP --> Idempotency["Idempotency middleware<br/>повтор сохранённого HTTP-ответа"]
+    Idempotency -->|WithinTransaction| TM
+    Idempotency -->|Lock / Save| Responses["postgres/idempotency.Repository"]
+    Idempotency -->|первый запрос: handler / Execute| UC
+    Responses -->|SQL, общий tx из context| DB
     UC -->|конструкторы и переходы статусов| Domain["domain<br/>Job / Quote"]
     UC -->|WithinTransaction| TM["postgres.TransactionManager"]
     UC -->|порты сценариев| Jobs["postgres/job.Repository<br/>SQL и конвертеры джобы"]
@@ -69,6 +74,7 @@ flowchart TD
     App --> UC["usecase<br/>сценарии и их порты"]
     App --> Jobs["repo/postgres/job"]
     App --> Quotes["repo/postgres/quote"]
+    App --> Responses["repo/postgres/idempotency"]
     App --> Source["provider/frankfurter"]
     App --> Config["config"]
     App --> Postgres["pkg/postgres"]
@@ -81,11 +87,12 @@ flowchart TD
     Executor --> Postgres
     HTTP --> Handler
     HTTP --> Middleware["pkg/httpserver/middleware"]
+    Responses --> Middleware
+    Responses --> Postgres
     HTTP --> UC
     HTTP --> Domain["domain"]
     Handler --> UC
     Handler --> Domain
-    Jobs --> UC
     Jobs --> Domain
     Quotes --> Domain
     Worker --> Domain
@@ -104,8 +111,8 @@ flowchart TD
 от домена и собственных интерфейсов; реализации передаются в `internal/app`.
 `worker` вызывает usecase через свой интерфейс `JobProcessor`, поэтому ему
 не нужен импорт пакета `usecase`. Реализации удовлетворяют интерфейсам
-структурно. `repo/postgres/job` импортирует `usecase` для типа `JobUpdate`; `frankfurter`
-не импортирует внутренние пакеты приложения. Домен не импортирует остальные
+структурно. Репозитории используют доменную модель и не импортируют `usecase`;
+`frankfurter` не импортирует внутренние пакеты приложения. Домен не импортирует остальные
 слои приложения. Пакеты `pkg` не импортируют `internal`; usecase продолжает
 работать через собственный интерфейс `TransactionManager`. Общий
 `ServiceConfig` использует типы настроек компонентов; они не импортируют
@@ -128,12 +135,12 @@ flowchart TD
 `ErrorHandler.Adapt` превращает её в HTTP-ответ. JSON writer передаётся в
 конструктор handler функцией, поэтому обратного импорта `handler → http` нет. Общие middleware находятся в
 [pkg/httpserver/middleware](../pkg/httpserver/middleware): Recoverer, RequestID,
-Logger, Timeout и BodyLimit, каждый в отдельном файле. Роутер собирает их
+Logger, Timeout, BodyLimit и Idempotency, каждый в отдельном файле. Роутер собирает их
 цепочку и передаёт Recoverer callback, вызывающий свой ErrorHandler.
 Лимит тела 1 MiB задаётся в роутере; BodyLimit принимает размер параметром.
 
 Цепочка middleware: `Recoverer → RequestID → Logger → Timeout
-→ BodyLimit → chi router → HTTP handler`. Recoverer установлен первым и
+→ BodyLimit → chi router → Idempotency для POST → HTTP handler`. Recoverer установлен первым и
 перехватывает паники во всей цепочке. Ошибки, возвращённые handler, попадают
 в общий ErrorHandler. Он сохраняет единый JSON-формат и не заменяет ответ,
 если заголовки уже отправлены. Panic-ответы используют тот же формат.
@@ -147,11 +154,16 @@ Logger, Timeout и BodyLimit, каждый в отдельном файле. Р�
 заголовки во входы сценариев, а результаты — в HTTP DTO. Проверка валютной
 пары остаётся в домене. Бизнес-обработчики транспорта передают операции с БД
 в usecase; транзакциями управляет usecase через `TransactionManager`.
+Для POST с ключом внешнюю транзакцию открывает Idempotency: она объединяет
+создание Job и сохранение ответа, затем отправляет ответ после commit.
+При повторе middleware читает готовый ответ и не вызывает handler.
+[Подробная последовательность](idempotency.md#transaction).
 
 `RequestID` создаёт производный контекст через `WithValue`, затем
 `Timeout` добавляет deadline через `WithTimeout`. Handler получает
 этот контекст из `r.Context()` и передаёт его в `Execute`. Middleware не
-разбирают пару и не загружают джобу в контекст.
+разбирают пару и не загружают джобу в контекст. Idempotency добавляет
+технический ключ из заголовка; ключ не попадает в input usecase или домен.
 
 Внутри `WithinTransaction` появляется ещё один производный контекст с
 приватным ключом `pkg/postgres` для `pgx.Tx`. Usecase получает `txCtx`, но не извлекает
@@ -173,14 +185,15 @@ Logger, Timeout и BodyLimit, каждый в отдельном файле. Р�
 claim, обращение к источнику и complete либо retry. Узкие интерфейсы репозиториев
 объявлены рядом со сценариями, которые их используют; `RateProvider` — в
 `process_next.go`. Общий контракт транзакций находится в
-[transaction.go](../internal/usecase/transaction.go), метаданные сохранения
-джобы — в [job_update.go](../internal/usecase/job_update.go).
+[transaction.go](../internal/usecase/transaction.go), контракт сохранения
+джобы — в [claim.go](../internal/usecase/claim.go). Состояние и сроки находятся
+в `Job`, ожидаемый номер попытки передаётся отдельным аргументом Save.
 Новые джобы и котировки создаются через конструкторы домена, переходы статусов
 выполняют `Start`, `Reclaim`, `Complete`, `RetryOrFail` и `Fail`.
 
 | Сценарий | Действия и зависимости |
 | --- | --- |
-| [RequestUpdate](../internal/usecase/request_update.go) | Создать доменную Job, атомарно сохранить или получить по ключу; `JobCreator`, `TransactionManager` |
+| [RequestUpdate](../internal/usecase/request_update.go) | Создать и сохранить новую доменную Job; `JobCreator`, `TransactionManager` |
 | [GetJobResult](../internal/usecase/get_job_result.go) | Прочитать Job и, если done, Quote в транзакции; `JobReader`, `QuoteByJobReader`, `TransactionManager` |
 | [GetLatest](../internal/usecase/get_latest.go) | Проверить пару и прочитать последний результат; `LatestQuoteReader` |
 | [ClaimPending](../internal/usecase/claim_pending.go) | Забрать доступную Job, вызвать Start/Reclaim, сохранить lease; `JobClaimer`, `TransactionManager` |
@@ -219,11 +232,14 @@ claim, обращение к источнику и complete либо retry. Уз
 ## Транзакции и композиция
 
 `postgres.TransactionManager.WithinTransaction` открывает транзакцию и передаёт
-её через приватный ключ контекста. Оба репозитория используют один `pgx.Tx`;
+её через приватный ключ контекста. При существующем tx callback использует
+его, а завершает транзакцию внешняя операция. Репозитории используют один `pgx.Tx`;
 usecase не зависит от pgx. Ошибка или panic откатывает транзакцию. Claim
 блокирует доступную строку через `FOR UPDATE SKIP LOCKED`; провайдер вызывается
 после commit, затем complete в одной транзакции сохраняет джобу и котировку.
-Complete и retry проверяют lease token под блокировкой строки. Репозитории
+Complete и retry проверяют номер попытки и статус под блокировкой строки.
+`Save(ctx, job, expectedAttempt)` дополнительно сравнивает номер в SQL;
+срок аренды и время следующего запуска входят в `Job`. Репозитории
 конвертируют доменные сущности в свои модели PostgreSQL и обратно.
 
 [pool.go](../pkg/postgres/pool.go) создаёт пул и проверяет подключение.

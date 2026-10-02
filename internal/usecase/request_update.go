@@ -9,7 +9,7 @@ import (
 )
 
 type JobCreator interface {
-	Create(context.Context, *domain.Job) (*domain.Job, bool, error)
+	Create(context.Context, *domain.Job) (*domain.Job, error)
 }
 
 type CurrencyConfig struct {
@@ -27,29 +27,21 @@ func NewRequestUpdate(jobs JobCreator, tx TransactionManager, cfg CurrencyConfig
 }
 
 type RequestQuoteUpdateInput struct {
-	Pair           string
-	IdempotencyKey string
-}
-type RequestUpdateResult struct {
-	Job     *domain.Job
-	Created bool
+	Pair string
 }
 
-func (uc *RequestUpdate) Execute(ctx context.Context, input RequestQuoteUpdateInput) (*RequestUpdateResult, error) {
-	job, err := domain.NewJob(input.Pair, input.IdempotencyKey, uc.currencies)
+func (uc *RequestUpdate) Execute(ctx context.Context, input RequestQuoteUpdateInput) (*domain.Job, error) {
+	job, err := domain.NewJob(input.Pair, uc.currencies)
 	if err != nil {
 		return nil, err
 	}
-	var result *RequestUpdateResult
+	var result *domain.Job
 	err = uc.tx.WithinTransaction(ctx, func(txCtx context.Context) error {
-		stored, created, err := uc.jobs.Create(txCtx, job)
+		stored, err := uc.jobs.Create(txCtx, job)
 		if err != nil {
 			return fmt.Errorf("create quote update: %w", err)
 		}
-		if stored.Pair != job.Pair {
-			return ErrIdempotencyConflict
-		}
-		result = &RequestUpdateResult{Job: stored, Created: created}
+		result = stored
 		return nil
 	})
 	if err != nil {

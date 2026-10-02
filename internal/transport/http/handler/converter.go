@@ -7,8 +7,8 @@ import (
 	"currency-quotes/internal/usecase"
 )
 
-func toRequestUpdateInput(request updateRequest, idempotencyKey string) usecase.RequestQuoteUpdateInput {
-	return usecase.RequestQuoteUpdateInput{Pair: request.Pair, IdempotencyKey: idempotencyKey}
+func toRequestUpdateInput(request updateRequest) usecase.RequestQuoteUpdateInput {
+	return usecase.RequestQuoteUpdateInput{Pair: request.Pair}
 }
 
 func toGetUpdateInput(rawID string) (usecase.GetQuoteUpdateInput, error) {
@@ -23,8 +23,8 @@ func toGetLatestInput(pair string) usecase.GetLatestQuoteInput {
 	return usecase.GetLatestQuoteInput{Pair: pair}
 }
 
-func toUpdateResponse(result *usecase.RequestUpdateResult) updateResponse {
-	return updateResponse{JobID: result.Job.ID.String(), Status: publicStatus(result.Job.Status)}
+func toUpdateResponse(job *domain.Job) updateResponse {
+	return updateResponse{JobID: job.ID.String(), Status: publicStatus(job.Status)}
 }
 
 func toJobResponse(result *usecase.JobResult) jobResponse {

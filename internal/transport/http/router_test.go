@@ -18,21 +18,22 @@ import (
 	"currency-quotes/internal/domain"
 	httphandler "currency-quotes/internal/transport/http/handler"
 	"currency-quotes/internal/usecase"
+	"currency-quotes/pkg/httpserver/middleware"
 )
 
 type jobsStub struct {
-	create func(context.Context, string, string) (*domain.Job, bool, error)
+	create func(context.Context, string) (*domain.Job, error)
 	get    func(context.Context, domain.JobID) (*domain.Job, error)
 }
 
-func (s jobsStub) Create(ctx context.Context, job *domain.Job) (*domain.Job, bool, error) {
-	return s.create(ctx, job.Pair, job.IdempotencyKey)
+func (s jobsStub) Create(ctx context.Context, job *domain.Job) (*domain.Job, error) {
+	return s.create(ctx, job.Pair)
 }
 func (s jobsStub) GetByIDForUpdate(context.Context, domain.JobID) (*domain.Job, error) {
 	panic("unexpected row lock")
 }
 func (s jobsStub) LockNextAvailable(context.Context) (*domain.Job, error) { panic("unexpected claim") }
-func (s jobsStub) Save(context.Context, *domain.Job, usecase.JobUpdate) error {
+func (s jobsStub) Save(context.Context, *domain.Job, int) error {
 	panic("unexpected job save")
 }
 
@@ -63,13 +64,15 @@ func transportConfig(timeout time.Duration) Config {
 
 func newTestHandler(jobs jobsStub, quotes quotesStub) http.Handler {
 	return New(newTestUseCase(jobs, quotes, []string{"EUR", "MXN", "USD"}), slog.New(slog.NewTextHandler(io.Discard, nil)),
-		func(context.Context) error { return nil }, transportConfig(time.Second))
+		func(context.Context) error { return nil }, transportConfig(time.Second), newTestIdempotencyStore(), testTransactionManager{})
 }
 
-func call(t *testing.T, handler http.Handler, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
+func call(t *testing.T, handler http.Handler, method, path, body string, keys ...string) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
-	request.Header.Set("Idempotency-Key", "request-1")
+	if len(keys) > 0 {
+		request.Header.Set("Idempotency-Key", keys[0])
+	}
 	request.Header.Set("X-Request-ID", "test-request")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -85,36 +88,47 @@ func call(t *testing.T, handler http.Handler, method, path, body string) (*httpt
 
 func TestRequestUpdateIdempotency(t *testing.T) {
 	var stored *domain.Job
-	handler := newTestHandler(jobsStub{create: func(_ context.Context, pair, key string) (*domain.Job, bool, error) {
-		if key != "request-1" {
+	calls := 0
+	handler := newTestHandler(jobsStub{create: func(ctx context.Context, pair string) (*domain.Job, error) {
+		calls++
+		if key := middleware.IdempotencyKeyFromContext(ctx); key != "request-1" {
 			t.Fatalf("idempotency key = %q", key)
 		}
-		if stored != nil {
-			return stored, false, nil
-		}
 		stored = &domain.Job{ID: domain.NewJobID(), Pair: pair, Status: domain.JobStatusPending}
-		return stored, true, nil
+		return stored, nil
 	}}, quotesStub{})
 
-	for _, status := range []int{http.StatusAccepted, http.StatusOK} {
-		recorder, response := call(t, handler, http.MethodPost, "/v1/quote-updates", `{"pair":" eur/mxn "}`)
-		if recorder.Code != status || response["jobId"] != stored.ID.String() || response["status"] != "JOB_STATUS_PENDING" {
-			t.Fatalf("response = %d %v, want status %d and original job", recorder.Code, response, status)
+	var firstBody string
+	for _, body := range []string{`{"pair":" eur/mxn "}`, `{"pair":"USD/MXN"}`, `{`} {
+		recorder, response := call(t, handler, http.MethodPost, "/v1/quote-updates", body, "request-1")
+		if recorder.Code != http.StatusAccepted {
+			t.Errorf("status = %d, want 202", recorder.Code)
+		}
+		if response["jobId"] != stored.ID.String() {
+			t.Errorf("jobId = %v, want %s", response["jobId"], stored.ID)
+		}
+		if response["status"] != "JOB_STATUS_PENDING" {
+			t.Errorf("status in body = %v, want original pending", response["status"])
+		}
+		if firstBody == "" {
+			firstBody = recorder.Body.String()
+		} else if recorder.Body.String() != firstBody {
+			t.Error("repeated response body differs from original")
 		}
 		if stored.Pair != "EUR/MXN" {
 			t.Fatalf("stored pair = %q", stored.Pair)
 		}
+		stored.Status = domain.JobStatusDone
 	}
-	recorder, response := call(t, handler, http.MethodPost, "/v1/quote-updates", `{"pair":"USD/MXN"}`)
-	if recorder.Code != http.StatusConflict || response["code"] != "IDEMPOTENCY_CONFLICT" {
-		t.Fatalf("conflict response = %d %v", recorder.Code, response)
+	if calls != 1 {
+		t.Errorf("repository calls = %d, want 1", calls)
 	}
 }
 
 func TestRequestUpdateRejectsInvalidBodyBeforeCreatingJob(t *testing.T) {
-	handler := newTestHandler(jobsStub{create: func(context.Context, string, string) (*domain.Job, bool, error) {
+	handler := newTestHandler(jobsStub{create: func(context.Context, string) (*domain.Job, error) {
 		t.Fatal("invalid request reached repository")
-		return nil, false, nil
+		return nil, nil
 	}}, quotesStub{})
 	for _, body := range []string{"", "{", `{"pair":42}`, `{"pair":"EUR/MXN","extra":true}`, `{"pair":"EUR/MXN"} {}`, `{"pair":"EUR/GBP"}`, `{"pair":"USD/USD"}`} {
 		t.Run(body, func(t *testing.T) {
@@ -199,7 +213,7 @@ func TestRequestTimeoutReachesRepository(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}, []string{"EUR", "MXN", "USD"})
-	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Millisecond))
+	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Millisecond), newTestIdempotencyStore(), testTransactionManager{})
 	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
 	if recorder.Code != http.StatusGatewayTimeout || response["code"] != "GATEWAY_TIMEOUT" {
 		t.Fatalf("response = %d %v", recorder.Code, response)
@@ -218,7 +232,7 @@ func TestHealthEndpoints(t *testing.T) {
 				return errors.New("database unavailable")
 			}
 			return nil
-		}, transportConfig(time.Second))
+		}, transportConfig(time.Second), newTestIdempotencyStore(), testTransactionManager{})
 		recorder, _ := call(t, handler, http.MethodGet, "/healthz", "")
 		if recorder.Code != http.StatusOK || checked {
 			t.Fatal("liveness depends on the database")
@@ -254,11 +268,11 @@ func TestRoutingErrorsAreJSON(t *testing.T) {
 
 func TestHTTPUsesConfiguredCurrencies(t *testing.T) {
 	currencies := []string{"CHF", "JPY"}
-	jobs := jobsStub{create: func(_ context.Context, pair, _ string) (*domain.Job, bool, error) {
+	jobs := jobsStub{create: func(_ context.Context, pair string) (*domain.Job, error) {
 		if pair != "CHF/JPY" {
 			t.Fatalf("unconfigured pair reached repository: %s", pair)
 		}
-		return &domain.Job{ID: domain.NewJobID(), Pair: pair, Status: domain.JobStatusPending}, true, nil
+		return &domain.Job{ID: domain.NewJobID(), Pair: pair, Status: domain.JobStatusPending}, nil
 	}}
 	quotes := quotesStub{latest: func(_ context.Context, pair string) (*domain.QuoteValue, error) {
 		if pair != "CHF/JPY" {
@@ -267,7 +281,7 @@ func TestHTTPUsesConfiguredCurrencies(t *testing.T) {
 		return &domain.QuoteValue{Pair: pair, Price: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 	}}
 	handler := New(newTestUseCase(jobs, quotes, currencies),
-		slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Second))
+		slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Second), newTestIdempotencyStore(), testTransactionManager{})
 	for _, tc := range []struct {
 		method, path, body string
 		status             int
@@ -293,7 +307,7 @@ func TestHandlerPanicReturnsJSONAndLogs500(t *testing.T) {
 	uc := newTestUseCase(jobsStub{}, quotesStub{latest: func(context.Context, string) (*domain.QuoteValue, error) {
 		panic("private database panic")
 	}}, []string{"EUR", "MXN", "USD"})
-	handler := New(uc, log, func(context.Context) error { return nil }, transportConfig(time.Second))
+	handler := New(uc, log, func(context.Context) error { return nil }, transportConfig(time.Second), newTestIdempotencyStore(), testTransactionManager{})
 	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
 	if recorder.Code != http.StatusInternalServerError || response["code"] != "INTERNAL_ERROR" || response["requestId"] != "test-request" {
 		t.Fatalf("panic response = %d %v", recorder.Code, response)
@@ -321,9 +335,9 @@ func TestHandlerPanicReturnsJSONAndLogs500(t *testing.T) {
 }
 
 func TestOversizedTrailingBodyDoesNotCreateJob(t *testing.T) {
-	handler := newTestHandler(jobsStub{create: func(context.Context, string, string) (*domain.Job, bool, error) {
+	handler := newTestHandler(jobsStub{create: func(context.Context, string) (*domain.Job, error) {
 		t.Fatal("oversized request reached repository")
-		return nil, false, nil
+		return nil, nil
 	}}, quotesStub{})
 	body := `{"pair":"EUR/MXN"}` + strings.Repeat(" ", maxRequestBody)
 	recorder, response := call(t, handler, http.MethodPost, "/v1/quote-updates", body)
@@ -333,6 +347,23 @@ func TestOversizedTrailingBodyDoesNotCreateJob(t *testing.T) {
 }
 
 type testTransactionManager struct{}
+
+type testIdempotencyStore struct {
+	responses map[string]*middleware.StoredResponse
+}
+
+func newTestIdempotencyStore() *testIdempotencyStore {
+	return &testIdempotencyStore{responses: make(map[string]*middleware.StoredResponse)}
+}
+
+func (s *testIdempotencyStore) Lock(_ context.Context, key string) (*middleware.StoredResponse, error) {
+	return s.responses[key], nil
+}
+
+func (s *testIdempotencyStore) Save(_ context.Context, key string, response *middleware.StoredResponse) error {
+	s.responses[key] = response
+	return nil
+}
 
 func (testTransactionManager) WithinTransaction(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)

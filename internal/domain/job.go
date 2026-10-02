@@ -10,15 +10,12 @@ import (
 )
 
 var (
-	ErrClaimLost          = errors.New("job claim lost")
-	ErrNotFound           = errors.New("not found")
-	ErrInvalidJobID       = errors.New("invalid job ID")
-	ErrInvalidJob         = errors.New("invalid job")
-	ErrInvalidIdempotency = errors.New("invalid idempotency key")
-	ErrInvalidTransition  = errors.New("invalid job status transition")
+	ErrClaimLost         = errors.New("job claim lost")
+	ErrNotFound          = errors.New("not found")
+	ErrInvalidJobID      = errors.New("invalid job ID")
+	ErrInvalidJob        = errors.New("invalid job")
+	ErrInvalidTransition = errors.New("invalid job status transition")
 )
-
-const maxIdempotencyKeyLength = 128
 
 type JobID uuid.UUID
 
@@ -51,47 +48,52 @@ const (
 )
 
 type Job struct {
-	ID             JobID
-	Pair           string
-	IdempotencyKey string
-	Status         JobStatus
-	ErrorMessage   string
-	Attempts       int
-	LeaseToken     uuid.UUID
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID            JobID
+	Pair          string
+	Status        JobStatus
+	ErrorMessage  string
+	Attempts      int
+	LeaseUntil    time.Time
+	NextAttemptAt time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
-func NewJob(rawPair, idempotencyKey string, allowedCurrencies []string) (*Job, error) {
+func NewJob(rawPair string, allowedCurrencies []string) (*Job, error) {
 	pair, err := NormalizePair(rawPair, allowedCurrencies)
 	if err != nil {
 		return nil, err
 	}
-	if len(idempotencyKey) > maxIdempotencyKeyLength {
-		return nil, fmt.Errorf("%w: maximum length is %d bytes", ErrInvalidIdempotency, maxIdempotencyKeyLength)
-	}
 	now := time.Now().UTC()
 	return &Job{
-		ID: NewJobID(), Pair: pair, IdempotencyKey: idempotencyKey,
-		Status: JobStatusPending, CreatedAt: now, UpdatedAt: now,
+		ID: NewJobID(), Pair: pair,
+		Status: JobStatusPending, NextAttemptAt: now, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 
-func (j *Job) Start() error {
+func (j *Job) Start(leaseUntil time.Time) error {
 	if err := j.requireStatus(JobStatusPending, JobStatusProcessing); err != nil {
 		return err
 	}
+	if leaseUntil.IsZero() {
+		return fmt.Errorf("%w: lease deadline must not be empty", ErrInvalidJob)
+	}
 	j.Attempts++
 	j.Status = JobStatusProcessing
+	j.LeaseUntil = leaseUntil.UTC()
 	j.UpdatedAt = time.Now().UTC()
 	return nil
 }
 
-func (j *Job) Reclaim() error {
+func (j *Job) Reclaim(leaseUntil time.Time) error {
 	if err := j.requireStatus(JobStatusProcessing, JobStatusProcessing); err != nil {
 		return err
 	}
+	if leaseUntil.IsZero() {
+		return fmt.Errorf("%w: lease deadline must not be empty", ErrInvalidJob)
+	}
 	j.Attempts++
+	j.LeaseUntil = leaseUntil.UTC()
 	j.UpdatedAt = time.Now().UTC()
 	return nil
 }
@@ -108,12 +110,12 @@ func (j *Job) Complete(quote *Quote) error {
 	}
 	j.Status = JobStatusDone
 	j.ErrorMessage = ""
-	j.LeaseToken = uuid.Nil
+	j.LeaseUntil = time.Time{}
 	j.UpdatedAt = time.Now().UTC()
 	return nil
 }
 
-func (j *Job) RetryOrFail(maxAttempts int, publicMessage string) error {
+func (j *Job) RetryOrFail(maxAttempts int, publicMessage string, nextAttemptAt time.Time) error {
 	if err := j.requireStatus(JobStatusProcessing, JobStatusPending); err != nil {
 		return err
 	}
@@ -123,13 +125,17 @@ func (j *Job) RetryOrFail(maxAttempts int, publicMessage string) error {
 	if strings.TrimSpace(publicMessage) == "" {
 		return fmt.Errorf("%w: failure message must not be empty", ErrInvalidJob)
 	}
+	if nextAttemptAt.IsZero() {
+		return fmt.Errorf("%w: next attempt time must not be empty", ErrInvalidJob)
+	}
 	status := JobStatusPending
 	if j.Attempts >= maxAttempts {
 		status = JobStatusFailed
 	}
 	j.Status = status
 	j.ErrorMessage = publicMessage
-	j.LeaseToken = uuid.Nil
+	j.LeaseUntil = time.Time{}
+	j.NextAttemptAt = nextAttemptAt.UTC()
 	j.UpdatedAt = time.Now().UTC()
 	return nil
 }
@@ -143,7 +149,7 @@ func (j *Job) Fail(publicMessage string) error {
 	}
 	j.Status = JobStatusFailed
 	j.ErrorMessage = publicMessage
-	j.LeaseToken = uuid.Nil
+	j.LeaseUntil = time.Time{}
 	j.UpdatedAt = time.Now().UTC()
 	return nil
 }

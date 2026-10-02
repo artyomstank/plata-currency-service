@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"currency-quotes/internal/domain"
@@ -30,7 +29,7 @@ type jobFixture struct {
 	active                  bool
 	commits, rollbacks      int
 	quoteError, commitError error
-	lastUpdate              JobUpdate
+	lastExpectedAttempt     int
 	claim                   *ClaimPending
 	complete                *CompleteJob
 	retry                   *RetryJob
@@ -48,7 +47,7 @@ func cloneJob(job *domain.Job) *domain.Job {
 
 func newJobFixture(t *testing.T) *jobFixture {
 	t.Helper()
-	job, err := domain.NewJob("EUR/MXN", "request-1", []string{"EUR", "MXN", "USD"})
+	job, err := domain.NewJob("EUR/MXN", []string{"EUR", "MXN", "USD"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,13 +90,13 @@ func newJobFixture(t *testing.T) *jobFixture {
 			}
 			return cloneJob(f.stagedJob), nil
 		},
-		save: func(ctx context.Context, job *domain.Job, update JobUpdate) error {
+		save: func(ctx context.Context, job *domain.Job, expectedAttempt int) error {
 			checkContext(ctx)
-			if f.stagedJob.LeaseToken != update.ExpectedLeaseToken {
+			if f.stagedJob.Attempts != expectedAttempt {
 				return domain.ErrClaimLost
 			}
 			f.stagedJob = cloneJob(job)
-			f.lastUpdate = update
+			f.lastExpectedAttempt = expectedAttempt
 			return nil
 		},
 	}
@@ -127,7 +126,7 @@ func newJobFixture(t *testing.T) *jobFixture {
 }
 
 func completionInput(job *domain.Job) CompleteJobInput {
-	return CompleteJobInput{JobID: job.ID, LeaseToken: job.LeaseToken, Price: decimal.RequireFromString("19.123456789012345678"), SourceTime: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+	return CompleteJobInput{JobID: job.ID, ExpectedAttempt: job.Attempts, Price: decimal.RequireFromString("19.123456789012345678"), SourceTime: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
 }
 
 func TestClaimPendingStartsAttemptAndReplacesExpiredLease(t *testing.T) {
@@ -136,13 +135,12 @@ func TestClaimPendingStartsAttemptAndReplacesExpiredLease(t *testing.T) {
 			f := newJobFixture(t)
 			attempts := 1
 			if reclaim {
-				if err := f.job.Start(); err != nil {
+				if err := f.job.Start(time.Now().Add(time.Minute)); err != nil {
 					t.Fatal(err)
 				}
-				f.job.LeaseToken = uuid.New()
 				attempts = 2
 			}
-			oldToken := f.job.LeaseToken
+			oldAttempt := f.job.Attempts
 			now := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
 			f.claim.now = func() time.Time { return now }
 			f.retry.now = f.claim.now
@@ -150,11 +148,11 @@ func TestClaimPendingStartsAttemptAndReplacesExpiredLease(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if claimed.Status != domain.JobStatusProcessing || claimed.Attempts != attempts || claimed.LeaseToken == uuid.Nil || claimed.LeaseToken == oldToken {
+			if claimed.Status != domain.JobStatusProcessing || claimed.Attempts != attempts || claimed.Attempts <= oldAttempt {
 				t.Fatalf("unexpected claim: %+v", claimed)
 			}
-			if f.lastUpdate.ExpectedLeaseToken != oldToken || !f.lastUpdate.LeaseUntil.Equal(now.Add(30*time.Second)) || f.commits != 1 {
-				t.Fatalf("incorrect lease update: %+v", f.lastUpdate)
+			if f.lastExpectedAttempt != oldAttempt || !claimed.LeaseUntil.Equal(now.Add(30*time.Second)) || f.commits != 1 {
+				t.Fatalf("incorrect lease update: %+v", f.job)
 			}
 		})
 	}
@@ -181,7 +179,7 @@ func TestCompleteJobPersistsBothEntitiesAndReadsResult(t *testing.T) {
 	if err := f.complete.Execute(context.Background(), completionInput(job)); err != nil {
 		t.Fatal(err)
 	}
-	if f.job.Status != domain.JobStatusDone || f.job.LeaseToken != uuid.Nil || f.quote == nil || f.quote.JobID != job.ID {
+	if f.job.Status != domain.JobStatusDone || !f.job.LeaseUntil.IsZero() || f.quote == nil || f.quote.JobID != job.ID {
 		t.Fatalf("job=%+v quote=%+v", f.job, f.quote)
 	}
 	if err := f.quote.Validate(); err != nil {
@@ -214,7 +212,7 @@ func TestCompleteJobRollsBackBothRepositories(t *testing.T) {
 			if !errors.Is(err, failure) {
 				t.Fatalf("err=%v", err)
 			}
-			if f.quote != nil || f.job.Status != domain.JobStatusProcessing || f.job.LeaseToken != job.LeaseToken || f.rollbacks != 1 {
+			if f.quote != nil || f.job.Status != domain.JobStatusProcessing || f.job.Attempts != job.Attempts || !f.job.LeaseUntil.Equal(job.LeaseUntil) || f.rollbacks != 1 {
 				t.Fatalf("partially persisted completion: job=%+v quote=%+v", f.job, f.quote)
 			}
 		})
@@ -234,15 +232,55 @@ func TestStaleWorkerCannotCompleteOrReleaseReclaimedJob(t *testing.T) {
 	for _, release := range []bool{false, true} {
 		var err error
 		if release {
-			err = f.retry.Execute(context.Background(), RetryJobInput{old.ID, old.LeaseToken})
+			err = f.retry.Execute(context.Background(), RetryJobInput{old.ID, old.Attempts})
 		} else {
 			err = f.complete.Execute(context.Background(), completionInput(old))
 		}
 		if !errors.Is(err, domain.ErrClaimLost) {
 			t.Fatalf("stale operation err=%v", err)
 		}
-		if f.job.LeaseToken != current.LeaseToken || f.quote != nil {
+		if f.job.Attempts != current.Attempts || f.quote != nil {
 			t.Fatal("stale worker changed job")
+		}
+	}
+}
+
+func TestReleasedAttemptCannotCompleteOrRetryAgain(t *testing.T) {
+	f := newJobFixture(t)
+	job, err := f.claim.Execute(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := RetryJobInput{JobID: job.ID, ExpectedAttempt: job.Attempts}
+	if err := f.retry.Execute(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	before := *f.job
+	if err := f.complete.Execute(context.Background(), completionInput(job)); !errors.Is(err, domain.ErrClaimLost) {
+		t.Fatalf("released completion error = %v", err)
+	}
+	if err := f.retry.Execute(context.Background(), input); !errors.Is(err, domain.ErrClaimLost) {
+		t.Fatalf("duplicate retry error = %v", err)
+	}
+	if *f.job != before || f.quote != nil {
+		t.Fatal("released attempt changed the job")
+	}
+}
+
+func TestInvalidAttemptDoesNotReachRepository(t *testing.T) {
+	for _, attempt := range []int{0, -1} {
+		jobs := jobsStub{getLocked: func(context.Context, domain.JobID) (*domain.Job, error) {
+			t.Fatal("invalid attempt reached repository")
+			return nil, nil
+		}}
+		jobID := domain.NewJobID()
+		complete := NewCompleteJob(jobs, quotesStub{}, directTransaction())
+		if err := complete.Execute(context.Background(), CompleteJobInput{JobID: jobID, ExpectedAttempt: attempt}); !errors.Is(err, domain.ErrClaimLost) {
+			t.Fatalf("attempt %d completion error = %v", attempt, err)
+		}
+		retry := NewRetryJob(jobs, directTransaction(), RetryConfig{})
+		if err := retry.Execute(context.Background(), RetryJobInput{JobID: jobID, ExpectedAttempt: attempt}); !errors.Is(err, domain.ErrClaimLost) {
+			t.Fatalf("attempt %d retry error = %v", attempt, err)
 		}
 	}
 }
@@ -307,11 +345,11 @@ func TestProcessNextRetriesProviderErrorsAndInvalidData(t *testing.T) {
 				if attempt == 5 {
 					expected = domain.JobStatusFailed
 				}
-				if f.job.Status != expected || f.job.LeaseToken != uuid.Nil || f.job.ErrorMessage != publicProviderError || strings.Contains(f.job.ErrorMessage, "credentials") {
+				if f.job.Status != expected || !f.job.LeaseUntil.IsZero() || f.job.ErrorMessage != publicProviderError || strings.Contains(f.job.ErrorMessage, "credentials") {
 					t.Fatalf("retry job=%+v", f.job)
 				}
-				if !f.lastUpdate.NextAttemptAt.Equal(now.Add(time.Second*time.Duration(1<<(attempt-1)))) || f.quote != nil {
-					t.Fatalf("retry update=%+v", f.lastUpdate)
+				if !f.job.NextAttemptAt.Equal(now.Add(time.Second*time.Duration(1<<(attempt-1)))) || f.quote != nil {
+					t.Fatalf("retry update=%+v", f.job)
 				}
 			})
 		}
@@ -332,17 +370,17 @@ func TestRetryDelayCapsWithoutOverflow(t *testing.T) {
 
 func TestRequestUpdateUsesDomainConstructorBeforeTransaction(t *testing.T) {
 	transactions := 0
-	uc := NewRequestUpdate(jobsStub{createJob: func(_ context.Context, job *domain.Job) (*domain.Job, bool, error) {
+	uc := NewRequestUpdate(jobsStub{createJob: func(_ context.Context, job *domain.Job) (*domain.Job, error) {
 		if job.ID == (domain.JobID{}) || job.Status != domain.JobStatusPending || job.CreatedAt.IsZero() || job.Pair != "EUR/MXN" {
 			t.Fatalf("unconstructed job: %+v", job)
 		}
-		return job, true, nil
+		return job, nil
 	}}, directTransaction(), testCurrencies)
 	uc.tx = transactionFunc(func(ctx context.Context, fn func(context.Context) error) error { transactions++; return fn(ctx) })
 	if _, err := uc.Execute(context.Background(), RequestQuoteUpdateInput{Pair: "eur/mxn"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := uc.Execute(context.Background(), RequestQuoteUpdateInput{Pair: "EUR/MXN", IdempotencyKey: strings.Repeat("x", 129)}); !errors.Is(err, domain.ErrInvalidIdempotency) {
+	if _, err := uc.Execute(context.Background(), RequestQuoteUpdateInput{Pair: "EUR/EUR"}); !errors.Is(err, domain.ErrInvalidPair) {
 		t.Fatalf("err=%v", err)
 	}
 	if transactions != 1 {
@@ -389,7 +427,7 @@ func TestProcessNextFailsInvalidStoredPairWithoutCallingProvider(t *testing.T) {
 	if !claimed || !errors.Is(err, domain.ErrInvalidPair) {
 		t.Fatalf("claimed=%v err=%v", claimed, err)
 	}
-	if f.job.Status != domain.JobStatusFailed || f.job.Attempts != 1 || f.job.LeaseToken != uuid.Nil || f.quote != nil {
+	if f.job.Status != domain.JobStatusFailed || f.job.Attempts != 1 || !f.job.LeaseUntil.IsZero() || f.quote != nil {
 		t.Fatalf("invalid pair was not permanently failed: %+v", f.job)
 	}
 }

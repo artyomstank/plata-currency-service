@@ -9,6 +9,7 @@ import (
 
 	"currency-quotes/internal/config"
 	"currency-quotes/internal/provider/frankfurter"
+	idempotencyrepo "currency-quotes/internal/repo/postgres/idempotency"
 	jobrepo "currency-quotes/internal/repo/postgres/job"
 	quoterepo "currency-quotes/internal/repo/postgres/quote"
 	transporthttp "currency-quotes/internal/transport/http"
@@ -69,7 +70,7 @@ func newApplication(ctx context.Context, cfg config.ServiceConfig, log *slog.Log
 		GetLatest:     usecase.NewGetLatest(quotes, cfg.Currencies),
 	}
 	return &application{
-		server:    httpserver.New(cfg.HTTPServer, transporthttp.New(scenarios, log, pool.Ping, cfg.HTTPTransport)),
+		server:    httpserver.New(cfg.HTTPServer, transporthttp.New(scenarios, log, pool.Ping, cfg.HTTPTransport, idempotencyrepo.New(), tx)),
 		processor: usecase.NewProcessNext(claim, complete, retry, source), log: log,
 		workerCount: cfg.Runtime.WorkerCount, workerConfig: cfg.Worker, shutdownTimeout: cfg.Runtime.ShutdownTimeout,
 		closeResources: func() { sourceHTTP.CloseIdleConnections(); pool.Close() },

@@ -52,7 +52,7 @@ func TestExpiredRequestCannotWriteSuccessfulResponse(t *testing.T) {
 		<-ctx.Done()
 		return &domain.QuoteValue{Pair: pair, Price: decimal.NewFromInt(1), CreatedAt: time.Now()}, nil
 	}}, []string{"EUR", "MXN", "USD"})
-	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Millisecond))
+	handler := New(uc, slog.New(slog.NewTextHandler(io.Discard, nil)), func(context.Context) error { return nil }, transportConfig(time.Millisecond), newTestIdempotencyStore(), testTransactionManager{})
 	recorder, response := call(t, handler, http.MethodGet, "/v1/quotes/latest?pair=EUR%2FMXN", "")
 	if recorder.Code != http.StatusGatewayTimeout || response["code"] != "GATEWAY_TIMEOUT" {
 		t.Fatalf("expired request response = %d %v", recorder.Code, response)

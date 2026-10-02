@@ -58,7 +58,7 @@ func integrationUseCase(t *testing.T) (*integrationCases, *pgxpool.Pool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sql := strings.ReplaceAll(string(data), "CREATE TABLE quote_", "CREATE TEMP TABLE quote_")
+		sql := strings.ReplaceAll(string(data), "CREATE TABLE ", "CREATE TEMP TABLE ")
 		sql = strings.ReplaceAll(sql, "CREATE EXTENSION IF NOT EXISTS pgcrypto;", "")
 		if _, err := pool.Exec(ctx, sql); err != nil {
 			t.Fatalf("temporary schema from %s: %v", name, err)
@@ -90,25 +90,21 @@ func integrationClaim(t *testing.T, uc *integrationCases) *domain.Job {
 }
 
 func integrationCompletion(job *domain.Job) usecase.CompleteJobInput {
-	return usecase.CompleteJobInput{JobID: job.ID, LeaseToken: job.LeaseToken, Price: decimal.RequireFromString("19.123456789012345678"), SourceTime: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+	return usecase.CompleteJobInput{JobID: job.ID, ExpectedAttempt: job.Attempts, Price: decimal.RequireFromString("19.123456789012345678"), SourceTime: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
 }
 
-func TestIntegrationQuoteLifecycleAndIdempotency(t *testing.T) {
+func TestIntegrationQuoteLifecycle(t *testing.T) {
 	uc, _ := integrationUseCase(t)
 	ctx := context.Background()
-	first, err := uc.RequestUpdate.Execute(ctx, usecase.RequestQuoteUpdateInput{Pair: "eur/mxn", IdempotencyKey: "key-1"})
-	if err != nil || !first.Created {
-		t.Fatalf("first=%+v err=%v", first, err)
+	first, err := uc.RequestUpdate.Execute(ctx, usecase.RequestQuoteUpdateInput{Pair: "eur/mxn"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	repeated, err := uc.RequestUpdate.Execute(ctx, usecase.RequestQuoteUpdateInput{Pair: "EUR/MXN", IdempotencyKey: "key-1"})
-	if err != nil || repeated.Created || repeated.Job.ID != first.Job.ID {
-		t.Fatalf("repeated=%+v err=%v", repeated, err)
-	}
-	if _, err := uc.RequestUpdate.Execute(ctx, usecase.RequestQuoteUpdateInput{Pair: "USD/MXN", IdempotencyKey: "key-1"}); !errors.Is(err, usecase.ErrIdempotencyConflict) {
-		t.Fatalf("conflict=%v", err)
+	if first.ErrorMessage != "" {
+		t.Errorf("initial error message = %q, want empty", first.ErrorMessage)
 	}
 	job, err := uc.ClaimPending.Execute(ctx)
-	if err != nil || job == nil || job.ID != first.Job.ID || job.Attempts != 1 {
+	if err != nil || job == nil || job.ID != first.ID || job.Attempts != 1 {
 		t.Fatalf("claim=%v err=%v", job, err)
 	}
 	if next, err := uc.ClaimPending.Execute(ctx); err != nil || next != nil {
@@ -143,7 +139,7 @@ func TestIntegrationQuoteInsertFailureRollsBackJobStatus(t *testing.T) {
 		t.Fatal("expected numeric overflow")
 	}
 	stored, err := jobrepo.New(pool).GetByID(context.Background(), job.ID)
-	if err != nil || stored.Status != domain.JobStatusProcessing || stored.LeaseToken != job.LeaseToken {
+	if err != nil || stored.Status != domain.JobStatusProcessing || stored.Attempts != job.Attempts || !stored.LeaseUntil.Equal(job.LeaseUntil.Truncate(time.Microsecond)) {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
 	if _, err := quoterepo.New(pool).GetByJobID(context.Background(), job.ID); !errors.Is(err, domain.ErrNotFound) {
@@ -162,13 +158,13 @@ func TestIntegrationReclaimRejectsStaleWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	current, err := uc.ClaimPending.Execute(ctx)
-	if err != nil || current == nil || current.ID != old.ID || current.Attempts != 2 || current.LeaseToken == old.LeaseToken {
+	if err != nil || current == nil || current.ID != old.ID || current.Attempts != 2 || current.Attempts == old.Attempts {
 		t.Fatalf("reclaimed=%+v err=%v", current, err)
 	}
 	if err := uc.CompleteJob.Execute(ctx, integrationCompletion(old)); !errors.Is(err, domain.ErrClaimLost) {
 		t.Fatalf("stale completion=%v", err)
 	}
-	if err := uc.RetryJob.Execute(ctx, usecase.RetryJobInput{JobID: old.ID, LeaseToken: old.LeaseToken}); !errors.Is(err, domain.ErrClaimLost) {
+	if err := uc.RetryJob.Execute(ctx, usecase.RetryJobInput{JobID: old.ID, ExpectedAttempt: old.Attempts}); !errors.Is(err, domain.ErrClaimLost) {
 		t.Fatalf("stale release=%v", err)
 	}
 	if err := uc.CompleteJob.Execute(ctx, integrationCompletion(current)); err != nil {
@@ -180,7 +176,17 @@ func TestIntegrationRetryBackoffAndAttemptLimit(t *testing.T) {
 	uc, pool := integrationUseCase(t)
 	job := integrationClaim(t, uc)
 	ctx := context.Background()
-	if err := uc.RetryJob.Execute(ctx, usecase.RetryJobInput{JobID: job.ID, LeaseToken: job.LeaseToken}); err != nil {
+	var errorIsNull bool
+	if err := pool.QueryRow(ctx, `SELECT error_message IS NULL FROM quote_jobs WHERE id = $1`, uuid.UUID(job.ID)).Scan(&errorIsNull); err != nil {
+		t.Fatal(err)
+	}
+	if !errorIsNull {
+		t.Error("initial error message was not stored as NULL")
+	}
+	if job.ErrorMessage != "" {
+		t.Errorf("decoded initial error message = %q, want empty", job.ErrorMessage)
+	}
+	if err := uc.RetryJob.Execute(ctx, usecase.RetryJobInput{JobID: job.ID, ExpectedAttempt: job.Attempts}); err != nil {
 		t.Fatal(err)
 	}
 	if next, err := uc.ClaimPending.Execute(ctx); err != nil || next != nil {
@@ -193,14 +199,97 @@ func TestIntegrationRetryBackoffAndAttemptLimit(t *testing.T) {
 	if err != nil || job == nil || job.Attempts != 2 {
 		t.Fatalf("job=%v err=%v", job, err)
 	}
-	if err := uc.RetryJob.Execute(ctx, usecase.RetryJobInput{JobID: job.ID, LeaseToken: job.LeaseToken}); err != nil {
+	if job.ErrorMessage != "quote provider is temporarily unavailable" {
+		t.Errorf("decoded retry error message = %q", job.ErrorMessage)
+	}
+	if err := pool.QueryRow(ctx, `SELECT error_message IS NULL FROM quote_jobs WHERE id = $1`, uuid.UUID(job.ID)).Scan(&errorIsNull); err != nil {
+		t.Fatal(err)
+	}
+	if errorIsNull {
+		t.Error("retry error message was stored as NULL")
+	}
+	if err := uc.RetryJob.Execute(ctx, usecase.RetryJobInput{JobID: job.ID, ExpectedAttempt: job.Attempts}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := uc.GetJobResult.Execute(ctx, usecase.GetQuoteUpdateInput{JobID: job.ID})
-	if err != nil || result.Job.Status != domain.JobStatusFailed || result.Job.LeaseToken != uuid.Nil || result.Value != nil {
+	if err != nil || result.Job.Status != domain.JobStatusFailed || !result.Job.LeaseUntil.IsZero() || result.Value != nil {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	if next, err := uc.ClaimPending.Execute(ctx); err != nil || next != nil {
 		t.Fatalf("terminal job claimed: %v err=%v", next, err)
+	}
+}
+
+func TestIntegrationSaveRejectsReleasedAttempt(t *testing.T) {
+	uc, pool := integrationUseCase(t)
+	job := integrationClaim(t, uc)
+	ctx := context.Background()
+	quote, err := domain.NewQuote(job.ID, job.Pair, decimal.RequireFromString("20.12"), time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), []string{"EUR", "MXN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := *job
+	if err := completed.Complete(quote); err != nil {
+		t.Fatal(err)
+	}
+	released := *job
+	if err := released.RetryOrFail(2, "provider unavailable", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	repository := jobrepo.New(pool)
+	tx := postgres.NewTransactionManager(pool)
+	if err := tx.WithinTransaction(ctx, func(txCtx context.Context) error {
+		return repository.Save(txCtx, &completed, job.Attempts-1)
+	}); !errors.Is(err, domain.ErrClaimLost) {
+		t.Fatalf("wrong expected attempt error = %v", err)
+	}
+	decreased := *job
+	decreased.Attempts--
+	if err := tx.WithinTransaction(ctx, func(txCtx context.Context) error {
+		return repository.Save(txCtx, &decreased, job.Attempts)
+	}); !errors.Is(err, domain.ErrClaimLost) {
+		t.Fatalf("decreased attempt error = %v", err)
+	}
+	if err := uc.RetryJob.Execute(ctx, usecase.RetryJobInput{JobID: job.ID, ExpectedAttempt: job.Attempts}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := repository.GetByID(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []*domain.Job{&completed, &released, job} {
+		t.Run(string(stale.Status), func(t *testing.T) {
+			if err := tx.WithinTransaction(ctx, func(txCtx context.Context) error {
+				return repository.Save(txCtx, stale, job.Attempts)
+			}); !errors.Is(err, domain.ErrClaimLost) {
+				t.Fatalf("released save error = %v", err)
+			}
+		})
+	}
+	stored, err := repository.GetByID(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.JobStatusPending || stored.Attempts != job.Attempts || !stored.LeaseUntil.IsZero() || !stored.NextAttemptAt.Equal(before.NextAttemptAt) {
+		t.Fatalf("released job changed: %+v", stored)
+	}
+}
+
+func TestIntegrationExpiredLeaseCanCompleteWithoutReclaim(t *testing.T) {
+	uc, pool := integrationUseCase(t)
+	job := integrationClaim(t, uc)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `UPDATE quote_jobs SET lease_until = now() - interval '1 second' WHERE id = $1`, uuid.UUID(job.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.CompleteJob.Execute(ctx, integrationCompletion(job)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := uc.GetJobResult.Execute(ctx, usecase.GetQuoteUpdateInput{JobID: job.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Job.Status != domain.JobStatusDone || result.Job.Attempts != job.Attempts || !result.Job.LeaseUntil.IsZero() || result.Value == nil {
+		t.Fatalf("expired completion result = %+v", result)
 	}
 }

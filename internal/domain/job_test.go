@@ -2,19 +2,19 @@ package domain
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
 var testCurrencies = []string{"EUR", "MXN", "USD"}
 
+var testLeaseUntil = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+
 func newTestJob(t *testing.T) *Job {
 	t.Helper()
-	job, err := NewJob("EUR/MXN", "request-1", testCurrencies)
+	job, err := NewJob("EUR/MXN", testCurrencies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,28 +31,20 @@ func newTestQuote(t *testing.T, job *Job) *Quote {
 }
 
 func TestNewJob(t *testing.T) {
-	job, err := NewJob(" eur/mxn ", " key with spaces ", testCurrencies)
+	job, err := NewJob(" eur/mxn ", testCurrencies)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if job.ID == (JobID{}) || job.Pair != "EUR/MXN" || job.Status != JobStatusPending {
 		t.Fatalf("unexpected job: %+v", job)
 	}
-	if job.IdempotencyKey != " key with spaces " || job.Attempts != 0 || job.ErrorMessage != "" || job.LeaseToken != uuid.Nil {
+	if job.Attempts != 0 || job.ErrorMessage != "" || !job.LeaseUntil.IsZero() || !job.NextAttemptAt.Equal(job.CreatedAt) {
 		t.Fatalf("unexpected initial state: %+v", job)
 	}
 	if job.CreatedAt.IsZero() || !job.UpdatedAt.Equal(job.CreatedAt) || job.CreatedAt.Location() != time.UTC {
 		t.Fatalf("unexpected timestamps: created=%s updated=%s", job.CreatedAt, job.UpdatedAt)
 	}
-	for _, key := range []string{"", strings.Repeat("x", 128)} {
-		if _, err := NewJob("EUR/MXN", key, testCurrencies); err != nil {
-			t.Fatalf("valid key rejected: %v", err)
-		}
-	}
-	if _, err := NewJob("EUR/MXN", strings.Repeat("x", 129), testCurrencies); !errors.Is(err, ErrInvalidIdempotency) {
-		t.Fatalf("oversized key error = %v", err)
-	}
-	if _, err := NewJob("EUR/GBP", "", testCurrencies); !errors.Is(err, ErrInvalidPair) {
+	if _, err := NewJob("EUR/GBP", testCurrencies); !errors.Is(err, ErrInvalidPair) {
 		t.Fatalf("invalid pair error = %v", err)
 	}
 }
@@ -63,10 +55,12 @@ func TestJobTransitionMatrix(t *testing.T) {
 		from, to JobStatus
 		apply    func(*Job, *Quote) error
 	}{
-		{"start", JobStatusPending, JobStatusProcessing, func(j *Job, _ *Quote) error { return j.Start() }},
-		{"reclaim", JobStatusProcessing, JobStatusProcessing, func(j *Job, _ *Quote) error { return j.Reclaim() }},
+		{"start", JobStatusPending, JobStatusProcessing, func(j *Job, _ *Quote) error { return j.Start(testLeaseUntil) }},
+		{"reclaim", JobStatusProcessing, JobStatusProcessing, func(j *Job, _ *Quote) error { return j.Reclaim(testLeaseUntil.Add(time.Minute)) }},
 		{"complete", JobStatusProcessing, JobStatusDone, func(j *Job, q *Quote) error { return j.Complete(q) }},
-		{"retry", JobStatusProcessing, JobStatusPending, func(j *Job, _ *Quote) error { return j.RetryOrFail(3, "provider unavailable") }},
+		{"retry", JobStatusProcessing, JobStatusPending, func(j *Job, _ *Quote) error {
+			return j.RetryOrFail(3, "provider unavailable", testLeaseUntil.Add(time.Second))
+		}},
 		{"fail", JobStatusProcessing, JobStatusFailed, func(j *Job, _ *Quote) error { return j.Fail("permanent failure") }},
 	} {
 		for _, status := range []JobStatus{JobStatusPending, JobStatusProcessing, JobStatusDone, JobStatusFailed, "unknown"} {
@@ -95,40 +89,65 @@ func TestJobTransitionMatrix(t *testing.T) {
 
 func TestReclaimIncrementsAttemptsWithoutChangingIdentity(t *testing.T) {
 	job := newTestJob(t)
-	if err := job.Start(); err != nil {
+	if err := job.Start(testLeaseUntil); err != nil {
 		t.Fatal(err)
 	}
 	id, pair := job.ID, job.Pair
-	if err := job.Reclaim(); err != nil {
+	if err := job.Reclaim(testLeaseUntil.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if job.Attempts != 2 || job.Status != JobStatusProcessing || job.ID != id || job.Pair != pair {
+	if job.Attempts != 2 || job.Status != JobStatusProcessing || job.ID != id || job.Pair != pair || !job.LeaseUntil.Equal(testLeaseUntil.Add(time.Minute)) {
 		t.Fatalf("unexpected reclaimed job: %+v", job)
+	}
+}
+
+func TestJobRejectsEmptyLeaseDeadline(t *testing.T) {
+	for _, reclaim := range []bool{false, true} {
+		t.Run(map[bool]string{false: "start", true: "reclaim"}[reclaim], func(t *testing.T) {
+			job := newTestJob(t)
+			if reclaim {
+				if err := job.Start(testLeaseUntil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := *job
+			var err error
+			if reclaim {
+				err = job.Reclaim(time.Time{})
+			} else {
+				err = job.Start(time.Time{})
+			}
+			if !errors.Is(err, ErrInvalidJob) {
+				t.Fatalf("empty lease error = %v", err)
+			}
+			if *job != before {
+				t.Fatal("empty lease changed the job")
+			}
+		})
 	}
 }
 
 func TestJobRetryLifecycle(t *testing.T) {
 	job := newTestJob(t)
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err := job.Start(); err != nil {
+		if err := job.Start(testLeaseUntil); err != nil {
 			t.Fatal(err)
 		}
 		if job.Attempts != attempt {
 			t.Fatalf("attempts = %d, want %d", job.Attempts, attempt)
 		}
-		job.LeaseToken = uuid.New()
-		if err := job.RetryOrFail(3, "provider unavailable"); err != nil {
+		if err := job.RetryOrFail(3, "provider unavailable", testLeaseUntil.Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		want := JobStatusPending
 		if attempt == 3 {
 			want = JobStatusFailed
 		}
-		if job.Status != want || job.LeaseToken != uuid.Nil || job.ErrorMessage != "provider unavailable" {
+		if job.Status != want || !job.LeaseUntil.IsZero() || job.ErrorMessage != "provider unavailable" || !job.NextAttemptAt.Equal(testLeaseUntil.Add(time.Second)) {
 			t.Fatalf("unexpected retry state: %+v", job)
 		}
 	}
-	if err := job.Start(); !errors.Is(err, ErrInvalidTransition) {
+	if err := job.Start(testLeaseUntil); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("failed job restarted: %v", err)
 	}
 }
@@ -145,7 +164,7 @@ func TestJobCompletionRequiresMatchingValidQuote(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			job := newTestJob(t)
-			if err := job.Start(); err != nil {
+			if err := job.Start(testLeaseUntil); err != nil {
 				t.Fatal(err)
 			}
 			before := *job
@@ -158,27 +177,27 @@ func TestJobCompletionRequiresMatchingValidQuote(t *testing.T) {
 		})
 	}
 	job := newTestJob(t)
-	if err := job.Start(); err != nil {
+	if err := job.Start(testLeaseUntil); err != nil {
 		t.Fatal(err)
 	}
 	job.ErrorMessage = "previous attempt failed"
-	job.LeaseToken = uuid.New()
 	if err := job.Complete(newTestQuote(t, job)); err != nil {
 		t.Fatal(err)
 	}
-	if job.Status != JobStatusDone || job.ErrorMessage != "" || job.LeaseToken != uuid.Nil || job.Attempts != 1 {
+	if job.Status != JobStatusDone || job.ErrorMessage != "" || !job.LeaseUntil.IsZero() || job.Attempts != 1 {
 		t.Fatalf("unexpected completed state: %+v", job)
 	}
 }
 
 func TestJobRejectsInvalidRetryAndFailure(t *testing.T) {
 	for _, apply := range []func(*Job) error{
-		func(j *Job) error { return j.RetryOrFail(0, "failure") },
-		func(j *Job) error { return j.RetryOrFail(3, " ") },
+		func(j *Job) error { return j.RetryOrFail(0, "failure", testLeaseUntil) },
+		func(j *Job) error { return j.RetryOrFail(3, " ", testLeaseUntil) },
 		func(j *Job) error { return j.Fail("") },
+		func(j *Job) error { return j.RetryOrFail(3, "failure", time.Time{}) },
 	} {
 		job := newTestJob(t)
-		if err := job.Start(); err != nil {
+		if err := job.Start(testLeaseUntil); err != nil {
 			t.Fatal(err)
 		}
 		before := *job

@@ -5,21 +5,19 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
-
 	"currency-quotes/internal/domain"
 )
 
 type JobUpdater interface {
 	GetByIDForUpdate(context.Context, domain.JobID) (*domain.Job, error)
-	Save(context.Context, *domain.Job, JobUpdate) error
+	Save(ctx context.Context, job *domain.Job, expectedAttempt int) error
 }
 
-func loadClaim(ctx context.Context, jobs JobUpdater, id domain.JobID, token uuid.UUID) (*domain.Job, error) {
+func loadClaim(ctx context.Context, jobs JobUpdater, id domain.JobID, expectedAttempt int) (*domain.Job, error) {
 	if id == (domain.JobID{}) {
 		return nil, domain.ErrInvalidJobID
 	}
-	if token == uuid.Nil {
+	if expectedAttempt < 1 {
 		return nil, domain.ErrClaimLost
 	}
 	job, err := jobs.GetByIDForUpdate(ctx, id)
@@ -29,7 +27,7 @@ func loadClaim(ctx context.Context, jobs JobUpdater, id domain.JobID, token uuid
 	if err != nil {
 		return nil, fmt.Errorf("lock claimed job: %w", err)
 	}
-	if job.Status != domain.JobStatusProcessing || job.LeaseToken != token {
+	if job.Status != domain.JobStatusProcessing || job.Attempts != expectedAttempt {
 		return nil, domain.ErrClaimLost
 	}
 	return job, nil

@@ -6,6 +6,9 @@
 процессе, что HTTP. POST только сохраняет задачу; получение курса выполняет
 [ProcessNext](../internal/usecase/process_next.go).
 
+Доработки протокола и его связь с HTTP-идемпотентностью собраны в
+[документе об идемпотентности, джобах и stateless](reliability.md).
+
 <a id="processing"></a>
 
 ## Одна попытка обработки
@@ -28,8 +31,8 @@ sequenceDiagram
     T->>C: callback(txCtx)
     C->>J: LockNextAvailable(txCtx)
     J-->>C: Job под блокировкой
-    C->>C: Job.Start / Reclaim, новый token
-    C->>J: Save(txCtx, job, lease)
+    C->>C: Job.Start / Reclaim, Attempts + 1, LeaseUntil
+    C->>J: Save(txCtx, job, previousAttempt)
     C-->>T: nil
     T->>T: COMMIT
     T-->>C: nil
@@ -42,9 +45,9 @@ sequenceDiagram
     T->>T: BEGIN
     T->>F: callback(txCtx)
     F->>J: GetByIDForUpdate(txCtx, id)
-    J-->>F: Job с текущим token
-    F->>F: Сравнить claim, NewQuote, Job.Complete
-    F->>J: Save(txCtx, job, expectedToken)
+    J-->>F: Job с текущим Attempts
+    F->>F: Сравнить попытку, NewQuote, Job.Complete
+    F->>J: Save(txCtx, job, expectedAttempt)
     F->>Q: Save(txCtx, quote)
     F-->>T: nil
     T->>T: COMMIT
@@ -57,7 +60,10 @@ sequenceDiagram
 Реализация в [pkg/postgres/transaction.go](../pkg/postgres/transaction.go) открывает
 `pgx.Tx` и передаёт его через приватный ключ контекста. Оба репозитория
 используют один tx. Ошибка callback или panic приводит к rollback; ошибка
-commit также возвращается вызывающему коду. Вложенные транзакции запрещены.
+commit также возвращается вызывающему коду. Если tx уже есть в контексте,
+менеджер использует его; commit/rollback выполняет внешняя операция.
+Это позволяет [middleware идемпотентности](idempotency.md) сохранить новую
+джобу и исходный HTTP-ответ одним commit.
 
 Rollback выполняется с отдельным контекстом до 5 секунд, сохраняющим values,
 но не отмену исходного запроса. Это позволяет освободить транзакцию после
@@ -78,21 +84,29 @@ Complete сохраняет статус Job и Quote атомарно. Если
 Claim выбирает либо due-джобу в `pending`, либо `processing` с истёкшим или
 отсутствующим `lease_until`. `FOR UPDATE SKIP LOCKED` позволяет другим
 воркерам выбрать незаблокированные строки. После Start/Reclaim сохраняются
-новый token и `lease_until = now + JOB_LEASE_DURATION`, затем tx закрывается.
+`attempts + 1` и `lease_until = now + JOB_LEASE_DURATION`, затем tx закрывается.
 
 Complete и retry снова блокируют джобу через `FOR UPDATE`, требуют статус
-`processing` и тот же token. SQL Save дополнительно использует сравнение
-ожидаемого токена. Если другой воркер уже сделал reclaim, прежний получает
+`processing` и тот же номер попытки. `Save(ctx, job, expectedAttempt)`
+дополнительно проверяет `attempts = expectedAttempt` в SQL. При claim
+ожидается номер до Start/Reclaim; при complete/retry — номер, полученный
+при claim. Обновление строки, которая уже находится в `pending`, допускается
+только для начала новой попытки: целевой статус должен быть `processing`,
+а число попыток — больше ожидаемого.
+Так уже освобождённая попытка не может повторно сохранить результат или retry.
+Если другой воркер уже сделал reclaim, прежний получает
 `ErrClaimLost` и не может опубликовать результат.
 
 Сценарий не проверяет срок lease при завершении: истечение срока делает
-джобу доступной для reclaim, но пока token не заменён, прежняя попытка может
+джобу доступной для reclaim, но пока номер попытки не изменился, она может
 завершиться. Поэтому истечение lease и фактическая потеря claim различаются.
 Протокол не использует heartbeat для продления lease.
 
 Вызов внешнего источника может повториться после retry или падения процесса.
-Гарантируется защита сохранённого результата токеном, транзакцией и уникальным
-индексом; exactly-once вызов внешнего API не гарантируется.
+Гарантируется защита сохранённого результата номером попытки, транзакцией и
+уникальным индексом; exactly-once вызов внешнего API не гарантируется. После
+истечения аренды возможны пересекающиеся запросы старой и новой попыток.
+Сервис stateless: состояние джобы и координация экземпляров находятся в БД.
 
 <a id="retry"></a>
 

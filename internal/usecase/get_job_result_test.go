@@ -12,7 +12,7 @@ func TestGetJobResultMapsMissingJob(t *testing.T) {
 	t.Parallel()
 
 	jobs := jobsStub{
-		create: func(context.Context, string, string) (*domain.Job, bool, error) {
+		create: func(context.Context, string) (*domain.Job, error) {
 			panic("unexpected Create call")
 		},
 		get: func(context.Context, domain.JobID) (*domain.Job, error) {

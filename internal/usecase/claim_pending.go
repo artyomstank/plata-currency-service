@@ -5,14 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-
 	"currency-quotes/internal/domain"
 )
 
 type JobClaimer interface {
 	LockNextAvailable(context.Context) (*domain.Job, error)
-	Save(context.Context, *domain.Job, JobUpdate) error
+	Save(ctx context.Context, job *domain.Job, expectedAttempt int) error
 }
 
 type ClaimPendingConfig struct {
@@ -40,20 +38,17 @@ func (uc *ClaimPending) Execute(ctx context.Context) (*domain.Job, error) {
 		if job == nil {
 			return nil
 		}
-		expectedToken := job.LeaseToken
+		expectedAttempt := job.Attempts
+		leaseUntil := uc.now().Add(uc.leaseDuration)
 		if job.Status == domain.JobStatusProcessing {
-			err = job.Reclaim()
+			err = job.Reclaim(leaseUntil)
 		} else {
-			err = job.Start()
+			err = job.Start(leaseUntil)
 		}
 		if err != nil {
 			return err
 		}
-		job.LeaseToken = uuid.New()
-		if err := uc.jobs.Save(txCtx, job, JobUpdate{
-			ExpectedLeaseToken: expectedToken,
-			LeaseUntil:         uc.now().Add(uc.leaseDuration),
-		}); err != nil {
+		if err := uc.jobs.Save(txCtx, job, expectedAttempt); err != nil {
 			return fmt.Errorf("save job claim: %w", err)
 		}
 		claimed = job
