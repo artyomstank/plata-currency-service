@@ -1,0 +1,16 @@
+.git
+.DS_Store
+.idea
+.vscode
+
+.env
+.env.*
+*.local.env
+
+bin
+dist
+tmp
+*.test
+*.out
+coverage*.txt
+coverage*.html
