@@ -31,4 +31,4 @@
 | [Джобы](jobs.md) | [Обработка](jobs.md#processing), [lease](jobs.md#lease), [retry](jobs.md#retry) |
 | [Lifecycle](lifecycle.md) | [Владение ресурсами](lifecycle.md#ownership), [startup](lifecycle.md#startup), [контексты](lifecycle.md#contexts), [shutdown](lifecycle.md#shutdown), [границы гарантий](lifecycle.md#limits) |
 | [Trade-offs](trade-offs.md) | [Согласованные решения](trade-offs.md#agreed), [компромиссы](trade-offs.md#implementation), [ограничения](trade-offs.md#limits) |
-| [Разработка](development.md) | [Тесты](development.md#tests), [миграции](development.md#migrations), [расширение](development.md#changes) |
+| [Разработка](development.md) | [Тесты](development.md#tests), [CI](development.md#ci), [миграции](development.md#migrations), [расширение](development.md#changes) |

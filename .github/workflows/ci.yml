@@ -1,0 +1,103 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  unit_and_vet:
+    name: Unit Tests & vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Unit Tests
+        run: go test -race ./... -count=1
+
+  integration_tests:
+    name: Postgres Integration Tests
+    needs: unit_and_vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54322:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Integration Tests
+        run: go test -race -tags=integration ./internal/repo/postgres/... -count=1
+
+  build_and_smoke:
+    name: Build & Smoke Tests
+    needs: integration_tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: currency-service-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_FILE: deploy/docker-compose.yml
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_PORT: "54322"
+      HTTP_PORT: "18080"
+      ALLOWED_CURRENCIES: EUR,MXN,USD
+      PROVIDER_BASE_URL: http://127.0.0.1:1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare smoke configuration
+        run: touch "$RUNNER_TEMP/currency-service-ci.local.env"
+
+      - name: Build Docker images
+        run: docker compose --env-file "$RUNNER_TEMP/currency-service-ci.local.env" build migrate currency-service
+
+      - name: Pull PostgreSQL image
+        run: docker compose --env-file "$RUNNER_TEMP/currency-service-ci.local.env" pull postgres
+
+      - name: Start migrations and service
+        run: docker compose --env-file "$RUNNER_TEMP/currency-service-ci.local.env" up -d --no-build --pull never
+
+      - name: Smoke test
+        run: bash .github/scripts/smoke-test.sh
+
+      - name: Container logs
+        if: failure()
+        run: docker compose --env-file "$RUNNER_TEMP/currency-service-ci.local.env" logs --no-color --tail=200
+
+      - name: Clean up smoke environment
+        if: always()
+        run: docker compose --env-file "$RUNNER_TEMP/currency-service-ci.local.env" down --volumes --remove-orphans

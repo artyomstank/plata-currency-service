@@ -71,3 +71,5 @@ go vet ./...
 
 Остановка контейнеров с сохранением данных: `make docker-down`.
 Подробности интеграционных проверок — в [разделе разработки](docs/development.md).
+[CI в GitHub Actions](docs/development.md#ci): Unit tests & vet → PostgreSQL
+integration tests → Build & smoke test.

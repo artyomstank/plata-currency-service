@@ -54,6 +54,41 @@ go test -count=1 -race -tags=integration ./...
 GOTOOLCHAIN=local`. При отсутствии модулей такая проверка завершится ошибкой,
 а не скачает их.
 
+<a id="ci"></a>
+
+## GitHub Actions
+
+Workflow [ci.yml](../.github/workflows/ci.yml) запускается при push в `main`
+и при pull request в `main`. Три job выполняются последовательно через `needs`:
+
+| Job | Проверки |
+| --- | --- |
+| Unit tests & vet | `go vet ./...` и обычные тесты с `-race`, без PostgreSQL |
+| PostgreSQL integration tests | Тесты repo с `-tags=integration` на PostgreSQL 18, `localhost:54322` |
+| Build & smoke test | Сборка Docker targets `migrate` и `currency-service`, применение миграций, запуск HTTP-сервиса и проверки `/healthz` и `/readyz` |
+
+Ошибка job останавливает следующие job. Каждая получает отдельный Ubuntu
+runner. Последняя использует существующий [Compose](../deploy/docker-compose.yml)
+и отдельный проект с именем, содержащим ID и номер попытки workflow.
+Параметры тестовой БД задаются в workflow; ENV проекта и секреты не нужны.
+Пустой `currency-service-ci.local.env` исключает неявную загрузку другого ENV.
+
+[Smoke script](../.github/scripts/smoke-test.sh) ждёт HTTP с ограниченными
+повторами и проверяет JSON: `status=ok` для health и `status=ready` для readiness.
+CI-сервис доступен на `localhost:18080`. Проверка не создаёт джобы и не вызывает
+реальный Frankfurter; адрес источника указывает на локальный недоступный порт.
+При ошибке выводятся логи контейнеров. Cleanup с `if: always()` удаляет
+контейнеры и volume только отдельного CI-проекта, включая случай ошибки smoke.
+
+Тот же smoke script можно выполнить для уже запущенного локального сервиса:
+
+```bash
+SMOKE_BASE_URL=http://localhost:8080 bash .github/scripts/smoke-test.sh
+```
+
+Workflow проверяет сборку и запуск приложения; публикация образов и деплой
+в него не входят.
+
 <a id="migrations"></a>
 
 ## Миграции
