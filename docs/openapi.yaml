@@ -1,0 +1,640 @@
+openapi: 3.0.3
+info:
+  title: currency-service API
+  version: v1
+  description: |
+    Асинхронный сервис валютных котировок. Клиент создаёт джобу, воркер
+    получает курс у Frankfurter и сохраняет результат. POST не ждёт
+    провайдера; результат и текущий статус доступны через GET по jobId.
+
+    Аутентификация и авторизация отсутствуют. Ответы API GET и POST имеют
+    Content-Type: application/json. Цена передаётся строкой, время —
+    в UTC по RFC 3339 с возможной дробной частью.
+
+    Все GET-маршруты поддерживают HEAD с теми же статусами и заголовками,
+    без тела ответа. Неизвестный путь возвращает 404 с кодом NOT_FOUND;
+    неподдержанный метод — 405 с кодом METHOD_NOT_ALLOWED и заголовком Allow.
+
+    Контекстный таймаут HTTP-запроса по умолчанию составляет 3 секунды
+    и задаётся через HTTP_REQUEST_TIMEOUT. Истечение deadline даёт 504;
+    context.Canceled обрабатывается как 500. GATEWAY_TIMEOUT — публичный
+    код ошибки, сохранённый в контракте API.
+servers:
+  - url: /
+    description: Адрес HTTP-сервера, с которого загружена спецификация.
+security: []
+tags:
+  - name: Quote updates
+    description: Создание джоб и получение их состояния и результата.
+  - name: Quotes
+    description: Чтение сохранённых котировок.
+  - name: Health
+    description: Проверка процесса и подключения к PostgreSQL.
+paths:
+  /v1/quote-updates:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    post:
+      tags: [Quote updates]
+      operationId: requestQuoteUpdate
+      summary: Создать джобу обновления котировки
+      description: |
+        Первый успешный запрос создаёт джобу и возвращает 202 с jobId
+        и JOB_STATUS_PENDING. Получение курса выполняется в фоне.
+
+        Idempotency-Key необязателен. Без ключа каждый успешный POST
+        создаёт новую джобу. С сохранённым ключом возвращаются исходные
+        HTTP-статус, тело и заголовки, даже если джоба уже завершена,
+        новое тело отличается или список разрешённых валют изменился.
+        X-Request-ID принадлежит текущему запросу.
+
+        При повторе с сохранённым ключом тело не читается и не проверяется:
+        оно может отсутствовать или содержать невалидный JSON. Для новой
+        операции нужен новый ключ. Ошибки HTTP не сохраняются. Конкурентный
+        запрос с тем же ключом ждёт завершения первой транзакции и может
+        получить 504 по собственному deadline. Ключи глобальны для этого
+        маршрута; срок их удаления не задан.
+
+        Новый запрос должен содержать один JSON-объект. Неизвестные поля,
+        невалидный JSON, несколько JSON-значений и невалидная пара дают 400.
+        Content-Type запроса не проверяется обработчиком. Лимит чтения тела
+        составляет 1 MiB: обнаруженное декодером превышение даёт 413;
+        ошибка JSON, обнаруженная раньше, даёт 400. Сохранённый ответ
+        воспроизводится до чтения тела и проверки этого лимита.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: |
+          Тело требуется для создания новой джобы. При воспроизведении
+          ответа по уже сохранённому Idempotency-Key оно игнорируется.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteUpdateRequest'
+            example:
+              pair: EUR/MXN
+      responses:
+        '202':
+          description: |
+            Джоба создана либо воспроизведён исходный ответ по ключу.
+            Статус в этом ответе всегда JOB_STATUS_PENDING; текущее
+            состояние читается через GET /v1/quote-updates/{job_id}.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteUpdateAccepted'
+              example:
+                jobId: b18e9a84-0cdf-46bb-889d-ed4a7235c367
+                status: JOB_STATUS_PENDING
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+  /v1/quote-updates/{job_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+      - $ref: '#/components/parameters/JobID'
+    get:
+      tags: [Quote updates]
+      operationId: getQuoteUpdate
+      summary: Получить статус джобы и результат
+      description: |
+        Существующая джоба возвращает 200 в любом состоянии. Pending
+        и processing содержат jobId, status и pair. Done дополнительно
+        содержит price и updatedAt, failed — публичный errorMessage.
+        Ошибка фонового обращения к провайдеру отражается в состоянии
+        джобы, а не в HTTP-статусе этого запроса.
+
+        Attempts, срок обработки и исходная дата курса в ответ не входят.
+        Невалидный или нулевой UUID даёт 400, отсутствующая джоба — 404.
+        Отсутствие котировки у done-джобы считается внутренней ошибкой 500.
+      responses:
+        '200':
+          description: Текущее состояние джобы и результат, если он сохранён.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteUpdateResult'
+              examples:
+                pending:
+                  value:
+                    jobId: b18e9a84-0cdf-46bb-889d-ed4a7235c367
+                    status: JOB_STATUS_PENDING
+                    pair: EUR/MXN
+                processing:
+                  value:
+                    jobId: b18e9a84-0cdf-46bb-889d-ed4a7235c367
+                    status: JOB_STATUS_PROCESSING
+                    pair: EUR/MXN
+                done:
+                  value:
+                    jobId: b18e9a84-0cdf-46bb-889d-ed4a7235c367
+                    status: JOB_STATUS_DONE
+                    pair: EUR/MXN
+                    price: '20.123456789012345678'
+                    updatedAt: '2026-10-01T12:00:00.123456Z'
+                failed:
+                  value:
+                    jobId: b18e9a84-0cdf-46bb-889d-ed4a7235c367
+                    status: JOB_STATUS_FAILED
+                    pair: EUR/MXN
+                    errorMessage: quote provider is temporarily unavailable
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+    head:
+      tags: [Quote updates]
+      operationId: headQuoteUpdate
+      summary: Проверить доступность джобы без тела ответа
+      description: Выполняет тот же сценарий и проверки, что GET этого маршрута.
+      responses:
+        '200':
+          $ref: '#/components/responses/HeadOK'
+        '400':
+          $ref: '#/components/responses/HeadBadRequest'
+        '404':
+          $ref: '#/components/responses/HeadNotFound'
+        '500':
+          $ref: '#/components/responses/HeadInternalError'
+        '504':
+          $ref: '#/components/responses/HeadGatewayTimeout'
+  /v1/quotes/latest:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+      - $ref: '#/components/parameters/Pair'
+    get:
+      tags: [Quotes]
+      operationId: getLatestQuote
+      summary: Получить последнюю сохранённую котировку
+      description: |
+        Читает PostgreSQL, не создаёт джобу и не обращается к Frankfurter.
+        Последняя котировка определяется по времени сохранения created_at,
+        а не по исходной дате курса. Пока новая джоба обрабатывается,
+        ответ может содержать результат предыдущей джобы.
+        Невалидная или не разрешённая конфигом пара даёт 400;
+        отсутствие сохранённой котировки — 404.
+      responses:
+        '200':
+          description: Последняя сохранённая котировка для пары.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatestQuote'
+              example:
+                pair: EUR/MXN
+                price: '20.123456789012345678'
+                updatedAt: '2026-10-01T12:00:00.123456Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+    head:
+      tags: [Quotes]
+      operationId: headLatestQuote
+      summary: Проверить наличие последней котировки без тела ответа
+      description: Выполняет тот же сценарий и проверки, что GET этого маршрута.
+      responses:
+        '200':
+          $ref: '#/components/responses/HeadOK'
+        '400':
+          $ref: '#/components/responses/HeadBadRequest'
+        '404':
+          $ref: '#/components/responses/HeadNotFound'
+        '500':
+          $ref: '#/components/responses/HeadInternalError'
+        '504':
+          $ref: '#/components/responses/HeadGatewayTimeout'
+  /healthz:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Проверить, что процесс отвечает
+      description: Проверка не зависит от БД и доступности провайдера.
+      responses:
+        '200':
+          description: Процесс отвечает на HTTP-запросы.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Liveness'
+              example:
+                status: ok
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+    head:
+      tags: [Health]
+      operationId: headHealth
+      summary: Проверить процесс без тела ответа
+      responses:
+        '200':
+          $ref: '#/components/responses/HeadOK'
+        '500':
+          $ref: '#/components/responses/HeadInternalError'
+        '504':
+          $ref: '#/components/responses/HeadGatewayTimeout'
+  /readyz:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: Проверить подключение к PostgreSQL
+      description: |
+        Выполняет Ping БД. Не проверяет наличие таблиц, доступность
+        Frankfurter, завершение очереди или состояние drain.
+        Ошибка Ping, включая истечение его контекста, даёт 503
+        с status: not_ready вместо общего формата HTTP-ошибки.
+      responses:
+        '200':
+          description: Ping PostgreSQL завершился успешно.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example:
+                status: ready
+        '503':
+          description: Ping PostgreSQL завершился с ошибкой.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example:
+                status: not_ready
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+    head:
+      tags: [Health]
+      operationId: headReadiness
+      summary: Проверить подключение к PostgreSQL без тела ответа
+      description: Выполняет тот же Ping и возвращает те же статусы, что GET.
+      responses:
+        '200':
+          $ref: '#/components/responses/HeadOK'
+        '503':
+          description: Ping PostgreSQL завершился с ошибкой; тело отсутствует.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+        '500':
+          $ref: '#/components/responses/HeadInternalError'
+        '504':
+          $ref: '#/components/responses/HeadGatewayTimeout'
+components:
+  parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: |
+        Непустое значение длиной до 128 байт принимается от клиента.
+        Отсутствующее, пустое или слишком длинное значение заменяется UUID.
+        Значение возвращается в заголовке ответа и поле requestId ошибки.
+        Оно не сохраняется в джобе и не передаётся Frankfurter автоматически.
+        Ограничение измеряется в байтах UTF-8, а не в символах.
+      schema:
+        type: string
+      example: example-request-1
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Корректный UTF-8 без нулевого символа, не более 128 байт.
+        Пустое значение считается отсутствующим. Ключ сравнивается
+        без нормализации и применяется глобально к созданию джоб.
+        Повтор возвращает исходный успешный ответ независимо от нового тела.
+        Ограничение измеряется в байтах UTF-8, а не в символах.
+      schema:
+        type: string
+      example: example-1
+    JobID:
+      name: job_id
+      in: path
+      required: true
+      description: UUID джобы; нулевой UUID не допускается.
+      schema:
+        $ref: '#/components/schemas/JobID'
+    Pair:
+      name: pair
+      in: query
+      required: true
+      description: Валютная пара; оба кода должны быть разрешены текущим конфигом.
+      schema:
+        $ref: '#/components/schemas/CurrencyPairInput'
+      example: EUR/MXN
+  headers:
+    RequestID:
+      description: |
+        ID текущего запроса: принятый X-Request-ID либо сгенерированный UUID.
+        При повторе по Idempotency-Key сохраняется ID текущего запроса.
+      schema:
+        type: string
+      example: example-request-1
+  schemas:
+    JobID:
+      type: string
+      format: uuid
+      description: Ненулевой UUID джобы; ответы используют каноническую запись.
+      not:
+        enum: ['00000000-0000-0000-0000-000000000000']
+      example: b18e9a84-0cdf-46bb-889d-ed4a7235c367
+    CurrencyPairInput:
+      type: string
+      minLength: 1
+      description: |
+        Пара в формате BASE/QUOTE: каждый код содержит три ASCII-буквы,
+        коды должны различаться. Строка переводится в верхний регистр,
+        пробелы по краям всей строки удаляются. Пробелы внутри пары
+        не допускаются. Оба кода проверяются по ALLOWED_CURRENCIES;
+        по умолчанию разрешены EUR, MXN, USD. Список не фиксирован в схеме.
+      example: EUR/MXN
+    CurrencyPair:
+      type: string
+      pattern: '^[A-Z]{3}/[A-Z]{3}$'
+      description: Нормализованная пара разных валют в формате BASE/QUOTE.
+      example: EUR/MXN
+    Price:
+      type: string
+      pattern: '^[0-9]+(\.[0-9]+)?$'
+      description: |
+        Цена в десятичной записи без экспоненты. Передаётся строкой,
+        чтобы избежать потери точности при преобразовании в float.
+        В PostgreSQL хранится как NUMERIC(38,18).
+      example: '20.123456789012345678'
+    QuoteSavedAt:
+      type: string
+      format: date-time
+      description: Время сохранения котировки в UTC, с возможной дробной частью.
+      example: '2026-10-01T12:00:00.123456Z'
+    QuoteUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [pair]
+      properties:
+        pair:
+          $ref: '#/components/schemas/CurrencyPairInput'
+    QuoteUpdateAccepted:
+      type: object
+      additionalProperties: false
+      required: [jobId, status]
+      properties:
+        jobId:
+          $ref: '#/components/schemas/JobID'
+        status:
+          type: string
+          enum: [JOB_STATUS_PENDING]
+    QuoteUpdateResult:
+      oneOf:
+        - $ref: '#/components/schemas/UnfinishedQuoteUpdate'
+        - $ref: '#/components/schemas/CompletedQuoteUpdate'
+        - $ref: '#/components/schemas/FailedQuoteUpdate'
+    UnfinishedQuoteUpdate:
+      type: object
+      additionalProperties: false
+      required: [jobId, status, pair]
+      properties:
+        jobId:
+          $ref: '#/components/schemas/JobID'
+        status:
+          type: string
+          enum: [JOB_STATUS_PENDING, JOB_STATUS_PROCESSING]
+        pair:
+          $ref: '#/components/schemas/CurrencyPair'
+    CompletedQuoteUpdate:
+      type: object
+      additionalProperties: false
+      required: [jobId, status, pair, price, updatedAt]
+      properties:
+        jobId:
+          $ref: '#/components/schemas/JobID'
+        status:
+          type: string
+          enum: [JOB_STATUS_DONE]
+        pair:
+          $ref: '#/components/schemas/CurrencyPair'
+        price:
+          $ref: '#/components/schemas/Price'
+        updatedAt:
+          $ref: '#/components/schemas/QuoteSavedAt'
+    FailedQuoteUpdate:
+      type: object
+      additionalProperties: false
+      required: [jobId, status, pair, errorMessage]
+      properties:
+        jobId:
+          $ref: '#/components/schemas/JobID'
+        status:
+          type: string
+          enum: [JOB_STATUS_FAILED]
+        pair:
+          $ref: '#/components/schemas/CurrencyPair'
+        errorMessage:
+          type: string
+          description: Публичное сообщение об ошибке фоновой обработки.
+          example: quote provider is temporarily unavailable
+    LatestQuote:
+      type: object
+      additionalProperties: false
+      required: [pair, price, updatedAt]
+      properties:
+        pair:
+          $ref: '#/components/schemas/CurrencyPair'
+        price:
+          $ref: '#/components/schemas/Price'
+        updatedAt:
+          $ref: '#/components/schemas/QuoteSavedAt'
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_ARGUMENT
+            - NOT_FOUND
+            - METHOD_NOT_ALLOWED
+            - INTERNAL_ERROR
+            - GATEWAY_TIMEOUT
+        message:
+          type: string
+          description: Публичное описание ошибки; внутренние детали не выдаются.
+        requestId:
+          type: string
+          description: ID запроса, совпадающий с заголовком X-Request-ID.
+    Liveness:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+  responses:
+    BadRequest:
+      description: Невалидный JSON, job_id, валютная пара или Idempotency-Key.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INVALID_ARGUMENT
+            message: invalid job_id
+            requestId: example-request-1
+    NotFound:
+      description: Джоба, сохранённая котировка или маршрут не найдены.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            job:
+              value:
+                code: NOT_FOUND
+                message: job not found
+                requestId: example-request-1
+            quote:
+              value:
+                code: NOT_FOUND
+                message: no quote for pair
+                requestId: example-request-1
+            route:
+              value:
+                code: NOT_FOUND
+                message: route not found
+                requestId: example-request-1
+    MethodNotAllowed:
+      description: Метод не поддерживается маршрутом.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Allow:
+          description: Поддерживаемые маршрутом методы через запятую.
+          schema:
+            type: string
+          example: GET, HEAD
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: METHOD_NOT_ALLOWED
+            message: method not allowed
+            requestId: example-request-1
+    BodyTooLarge:
+      description: При чтении JSON обнаружено превышение лимита тела в 1 MiB.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INVALID_ARGUMENT
+            message: request body is too large
+            requestId: example-request-1
+    InternalError:
+      description: Внутренняя ошибка, panic или context.Canceled.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INTERNAL_ERROR
+            message: internal error
+            requestId: example-request-1
+    GatewayTimeout:
+      description: Истёк контекстный таймаут HTTP-запроса.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: GATEWAY_TIMEOUT
+            message: request timed out
+            requestId: example-request-1
+    HeadOK:
+      description: Успешный ответ с заголовками как у GET, без тела.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+    HeadBadRequest:
+      description: Невалидный job_id или валютная пара; тело отсутствует.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+    HeadNotFound:
+      description: Джоба или котировка не найдены; тело отсутствует.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+    HeadInternalError:
+      description: Внутренняя ошибка, panic или context.Canceled; тело отсутствует.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+    HeadGatewayTimeout:
+      description: Истёк контекстный таймаут HTTP-запроса; тело отсутствует.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'

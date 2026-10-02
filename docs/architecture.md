@@ -89,6 +89,7 @@ flowchart TD
     Executor --> Postgres
     HTTP --> Handler
     HTTP --> Middleware["pkg/httpserver/middleware"]
+    HTTP --> Docs["docs<br/>встроенная спецификация и Swagger UI"]
     Responses --> Middleware
     Responses --> Postgres
     HTTP --> UC
@@ -139,6 +140,8 @@ flowchart TD
 [pkg/httpserver/middleware](../pkg/httpserver/middleware): Recoverer, RequestID,
 Logger, Timeout, BodyLimit и Idempotency, каждый в отдельном файле. Роутер собирает их
 цепочку и передаёт Recoverer callback, вызывающий свой ErrorHandler.
+`docs.go` отдаёт встроенную [спецификацию и Swagger UI](api.md#openapi)
+на `/openapi.yaml` и `/docs/`; эти маршруты не вызывают usecase или репозитории.
 Роутер передаёт в BodyLimit значение `HTTPTransport.MaxBodyBytes`;
 загрузчик конфигурации задаёт default 1 MiB.
 

@@ -39,6 +39,12 @@ func New(uc *handler.UseCases, log *slog.Logger, ready func(context.Context) err
 	router.Head("/healthz", errors.Adapt(h.Health))
 	router.Get("/readyz", errors.Adapt(h.Readiness))
 	router.Head("/readyz", errors.Adapt(h.Readiness))
+	router.Get("/docs", redirectDocumentation)
+	router.Head("/docs", redirectDocumentation)
+	router.Get("/docs/*", errors.Adapt(serveDocumentation))
+	router.Head("/docs/*", errors.Adapt(serveDocumentation))
+	router.Get("/openapi.yaml", errors.Adapt(serveOpenAPI))
+	router.Head("/openapi.yaml", errors.Adapt(serveOpenAPI))
 	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		errors.Handle(w, r, errRouteNotFound)
 	})

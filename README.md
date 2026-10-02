@@ -47,6 +47,9 @@ curl -i http://localhost:8080/v1/quote-updates \
 Цена возвращается строкой. По умолчанию разрешены EUR, MXN и USD; список
 задаётся через `ALLOWED_CURRENCIES`. [Контракт API и примеры](docs/api.md).
 
+Swagger UI: [http://localhost:8080/docs/](http://localhost:8080/docs/).
+Спецификация: [http://localhost:8080/openapi.yaml](http://localhost:8080/openapi.yaml).
+
 ## Документация
 
 | Раздел | Что внутри |
@@ -55,6 +58,7 @@ curl -i http://localhost:8080/v1/quote-updates \
 | [Архитектура](docs/architecture.md) | Границы слоёв, зависимости, middleware, сценарии |
 | [Доменная модель](docs/domain.md) | Job, Quote, типы ID, правила и переходы статусов |
 | [HTTP API](docs/api.md) | Запросы, ответы, ошибки и идемпотентность |
+| [OpenAPI](docs/openapi.yaml) | Спецификация HTTP API с моделями и примерами |
 | [HTTP-идемпотентность](docs/idempotency.md) | Сохранённый ответ, конкурентные запросы и атомарность |
 | [Идемпотентность, джобы и stateless](docs/reliability.md) | Доработки протокола, восстановление и границы гарантий |
 | [Запуск](docs/running.md) | Docker, запуск на хосте, остановка, диагностика |

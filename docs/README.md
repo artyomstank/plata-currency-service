@@ -9,7 +9,7 @@
 
 - Запустить сервис: [запуск](running.md), затем [первый запрос](api.md#first-request).
 - Разобраться в коде: [архитектура](architecture.md), [домен](domain.md), [обработка джоб](jobs.md).
-- Подключить клиент: [HTTP API](api.md), [валюты и настройки](configuration.md).
+- Подключить клиент: [HTTP API](api.md), [OpenAPI](openapi.yaml), [валюты и настройки](configuration.md).
 - Изменить источник курсов: [Frankfurter и ACL](provider.md), [границы адаптеров](architecture.md#boundaries).
 - Разрабатывать и проверять изменения: [разработка](development.md).
 - Понять причины выбора архитектуры: [решения и trade-offs](trade-offs.md).
@@ -22,7 +22,8 @@
 | --- | --- |
 | [Архитектура](architecture.md) | [Границы](architecture.md#boundaries), [сценарии](architecture.md#scenarios), [контекст](architecture.md#context), [конвертеры](architecture.md#converters) |
 | [Домен](domain.md) | [Job](domain.md#job), [статусы](domain.md#transitions), [Quote](domain.md#quote), [правила валют](domain.md#currencies) |
-| [API](api.md) | [Создание](api.md#create), [результат](api.md#result), [latest](api.md#latest), [ошибки](api.md#errors), [идемпотентность](api.md#idempotency) |
+| [API](api.md) | [Swagger UI и OpenAPI](api.md#openapi), [создание](api.md#create), [результат](api.md#result), [latest](api.md#latest), [ошибки](api.md#errors), [идемпотентность](api.md#idempotency) |
+| [OpenAPI](openapi.yaml) | Маршруты GET, POST и HEAD, параметры, модели, ошибки и примеры |
 | [HTTP-идемпотентность](idempotency.md) | [Контракт](idempotency.md#contract), [транзакция](idempotency.md#transaction), [таблица и миграция](idempotency.md#storage), [границы](idempotency.md#limits) |
 | [Идемпотентность, джобы и stateless](reliability.md) | [Изменения](reliability.md#changes), [HTTP](reliability.md#idempotency), [job](reliability.md#jobs), [stateless](reliability.md#stateless), [гарантии](reliability.md#guarantees), [миграции](reliability.md#migrations), [проверки](reliability.md#checks) |
 | [Запуск](running.md) | [Docker](running.md#docker), [хост](running.md#host), [остановка](running.md#stop), [диагностика](running.md#troubleshooting) |
