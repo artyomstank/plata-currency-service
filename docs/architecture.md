@@ -2,10 +2,10 @@
 
 [Главная](../README.md) · [Документация](README.md) · [Домен](domain.md) · [Trade-offs](trade-offs.md)
 
-В проекте старался использовать прагматичный DDD и clean подход: доменные правила отделены
-от сценариев, а сценарии работают через порты. Здесь один процесс, одна БД
-и один источник курсов. Дополнительные слои для простого проксирования вызовов
-не требуются.
+Я выбрал прагматичный DDD и clean подход, чтобы отделить доменные правила
+от сценариев и инфраструктуры. Сценарии работают через порты. Для текущего
+объёма задач я оставил один процесс, одну БД и один источник курсов;
+каждый слой имеет собственную ответственность.
 
 <a id="boundaries"></a>
 
@@ -34,15 +34,17 @@ Migrator остаётся отдельной командой [cmd/migrate](../c
 
 ```mermaid
 flowchart LR
-    Client["Клиент"] -->|HTTP / JSON| HTTP["transport/http<br/>router / handler / DTO"]
+    Client["Клиент"] -->|HTTP / JSON| HTTP["transport/http<br/>router / middleware / ErrorHandler"]
     App["internal/app<br/>сборка и жизненный цикл"] -.-> HTTP
     App -.-> Worker["worker<br/>опрос очереди"]
     Worker -->|ProcessNext.Execute| UC["usecase<br/>отдельные сценарии"]
-    HTTP -->|Execute: input + context| UC
-    HTTP --> Idempotency["Idempotency middleware<br/>повтор сохранённого HTTP-ответа"]
+    HTTP -->|POST без ключа, GET / HEAD| Handler["transport/http/handler<br/>обработчики / DTO / конвертеры"]
+    Handler -->|Execute: input + context| UC
+    HTTP -->|POST с ключом| Idempotency["Idempotency middleware<br/>повтор сохранённого HTTP-ответа"]
     Idempotency -->|WithinTransaction| TM
     Idempotency -->|Lock / Save| Responses["postgres/idempotency.Repository"]
-    Idempotency -->|первый запрос: handler / Execute| UC
+    Idempotency -->|первый запрос| Handler
+    Idempotency -->|повтор: сохранённый ответ| Client
     Responses -->|SQL, общий tx из context| DB
     UC -->|конструкторы и переходы статусов| Domain["domain<br/>Job / Quote"]
     UC -->|WithinTransaction| TM["postgres.TransactionManager"]
@@ -137,7 +139,8 @@ flowchart TD
 [pkg/httpserver/middleware](../pkg/httpserver/middleware): Recoverer, RequestID,
 Logger, Timeout, BodyLimit и Idempotency, каждый в отдельном файле. Роутер собирает их
 цепочку и передаёт Recoverer callback, вызывающий свой ErrorHandler.
-Лимит тела 1 MiB задаётся в роутере; BodyLimit принимает размер параметром.
+Роутер передаёт в BodyLimit значение `HTTPTransport.MaxBodyBytes`;
+загрузчик конфигурации задаёт default 1 MiB.
 
 Цепочка middleware: `Recoverer → RequestID → Logger → Timeout
 → BodyLimit → chi router → Idempotency для POST → HTTP handler`. Recoverer установлен первым и
@@ -150,8 +153,9 @@ Logger, Timeout, BodyLimit и Idempotency, каждый в отдельном ф
 ## Middleware и контекст
 
 В контексте передаётся request ID; данные задачи передаются явно через
-входные структуры use case. Конвертеры транспорта переводят JSON, URL и
-заголовки во входы сценариев, а результаты — в HTTP DTO. Проверка валютной
+входные структуры use case. Конвертеры транспорта переводят JSON, параметры
+пути и query во входы сценариев, а результаты — в HTTP DTO. Заголовки request ID
+и идемпотентности читают middleware. Проверка валютной
 пары остаётся в домене. Бизнес-обработчики транспорта передают операции с БД
 в usecase; транзакциями управляет usecase через `TransactionManager`.
 Для POST с ключом внешнюю транзакцию открывает Idempotency: она объединяет
@@ -208,8 +212,9 @@ claim, обращение к источнику и complete либо retry. Уз
 реестра интерфейсов или обязательного импорта пакета потребителя.
 
 Разделение на файлы следует действиям, а не таблицам: `GetJobResult` и
-`CompleteJob` используют и джобу, и котировку. Два репозитория означают две
-области хранения, но не два набора бизнес-сценариев.
+`CompleteJob` используют и джобу, и котировку. Репозитории Job и Quote означают
+две области бизнес-данных, но не два набора сценариев. Третий репозиторий,
+`idempotency`, хранит технические HTTP-ответы и используется middleware.
 
 <a id="converters"></a>
 
@@ -217,9 +222,10 @@ claim, обращение к источнику и complete либо retry. Уз
 
 | Граница | Преобразование |
 | --- | --- |
-| HTTP → usecase | JSON/URL/заголовки → типизированный input в [converter.go](../internal/transport/http/handler/converter.go) |
+| HTTP → usecase | JSON/параметры пути/query → типизированный input в [converter.go](../internal/transport/http/handler/converter.go) |
 | Usecase → domain | Конструкторы `NewJob`, `NewQuote`; уже загруженные сущности используют методы переходов |
 | Domain ↔ repo | Внутренние `jobModel`/`quoteModel`, UUID и строковое представление decimal |
+| Middleware ↔ repo | `StoredResponse` ↔ приватная `responseModel` в [postgres/idempotency](../internal/repo/postgres/idempotency); доменные сущности здесь не участвуют |
 | Frankfurter → usecase | `latestResponse` → decimal и время через [Adapter](../internal/provider/frankfurter/adapter.go) |
 | Usecase → HTTP | Результат → публичный DTO и строковые статусы |
 
@@ -249,6 +255,11 @@ Complete и retry проверяют номер попытки и статус �
 содержат `repository.go` с SQL и Scan, `model.go` с приватной моделью БД и
 `converter.go` с преобразованиями в домен и обратно. Родительский пакет
 executor не импортирует эти репозитории; app собирает их напрямую.
+`jobModel.ErrorMessage` использует `sql.NullString`, `LeaseUntil` — `*time.Time`:
+SQL читает nullable-колонки напрямую, конвертер переводит NULL в нулевые
+значения домена. Подпакет [idempotency](../internal/repo/postgres/idempotency)
+также содержит repository, model и converter, но преобразует технический
+HTTP-ответ и всегда требует транзакцию.
 
 [httpclient.New](../pkg/httpclient/client.go) возвращает `*http.Client` с
 отдельным transport и цепочкой middleware. Заголовки и сообщение логов

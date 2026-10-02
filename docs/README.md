@@ -28,7 +28,7 @@
 | [Запуск](running.md) | [Docker](running.md#docker), [хост](running.md#host), [остановка](running.md#stop), [диагностика](running.md#troubleshooting) |
 | [Конфигурация](configuration.md) | [Валюты](configuration.md#currencies), [ENV в Compose](configuration.md#compose), [переменные](configuration.md#variables) |
 | [Провайдер](provider.md) | [Выбор Frankfurter](provider.md#choice), [HTTP-клиент и ACL](provider.md#adapter), [ошибки](provider.md#failures), [замена](provider.md#replacement) |
-| [Джобы](jobs.md) | [Обработка](jobs.md#processing), [lease](jobs.md#lease), [retry](jobs.md#retry) |
+| [Джобы](jobs.md) | [Polling](jobs.md#polling), [обработка](jobs.md#processing), [lease](jobs.md#lease), [retry](jobs.md#retry) |
 | [Lifecycle](lifecycle.md) | [Владение ресурсами](lifecycle.md#ownership), [startup](lifecycle.md#startup), [контексты](lifecycle.md#contexts), [shutdown](lifecycle.md#shutdown), [границы гарантий](lifecycle.md#limits) |
-| [Trade-offs](trade-offs.md) | [Согласованные решения](trade-offs.md#agreed), [компромиссы](trade-offs.md#implementation), [ограничения](trade-offs.md#limits) |
+| [Trade-offs](trade-offs.md) | [История проектирования](trade-offs.md#history), [принятые решения](trade-offs.md#agreed), [компромиссы](trade-offs.md#implementation), [границы гарантий](reliability.md#guarantees) |
 | [Разработка](development.md) | [Тесты](development.md#tests), [CI](development.md#ci), [миграции](development.md#migrations), [расширение](development.md#changes) |

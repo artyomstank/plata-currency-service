@@ -63,15 +63,18 @@ Workflow [ci.yml](../.github/workflows/ci.yml) запускается при pus
 
 | Job | Проверки |
 | --- | --- |
-| Unit tests & vet | `go vet ./...` и обычные тесты с `-race`, без PostgreSQL |
-| PostgreSQL integration tests | Тесты repo с `-tags=integration` на PostgreSQL 18, `localhost:54322` |
-| Build & smoke test | Сборка Docker targets `migrate` и `currency-service`, применение миграций, запуск HTTP-сервиса и проверки `/healthz` и `/readyz` |
+| Unit Tests & vet (`unit_and_vet`) | `go vet ./...` и `go test -race ./... -count=1`, без PostgreSQL |
+| Postgres Integration Tests (`integration_tests`) | `go test -race -tags=integration ./internal/repo/postgres/... -count=1` на PostgreSQL 18, `localhost:54322` |
+| Build & Smoke Tests (`build_and_smoke`) | Сборка Docker targets `migrate` и `currency-service`, применение миграций, запуск HTTP-сервиса и проверки `/healthz` и `/readyz` |
 
 Ошибка job останавливает следующие job. Каждая получает отдельный Ubuntu
 runner. Последняя использует существующий [Compose](../deploy/docker-compose.yml)
 и отдельный проект с именем, содержащим ID и номер попытки workflow.
 Параметры тестовой БД задаются в workflow; ENV проекта и секреты не нужны.
 Пустой `currency-service-ci.local.env` исключает неявную загрузку другого ENV.
+Push в отдельную ветку сам по себе не запускает этот workflow; для такой
+ветки нужен pull request с целевой веткой `main`. Ручной trigger
+`workflow_dispatch` сейчас не задан.
 
 [Smoke script](../.github/scripts/smoke-test.sh) ждёт HTTP с ограниченными
 повторами и проверяет JSON: `status=ok` для health и `status=ready` для readiness.
@@ -80,14 +83,17 @@ CI-сервис доступен на `localhost:18080`. Проверка не �
 При ошибке выводятся логи контейнеров. Cleanup с `if: always()` удаляет
 контейнеры и volume только отдельного CI-проекта, включая случай ошибки smoke.
 
-Тот же smoke script можно выполнить для уже запущенного локального сервиса:
+Тот же smoke script можно выполнить для уже запущенного локального сервиса;
+на хосте нужны `bash`, `curl` и `jq`:
 
 ```bash
 SMOKE_BASE_URL=http://localhost:8080 bash .github/scripts/smoke-test.sh
 ```
 
 Workflow проверяет сборку и запуск приложения; публикация образов и деплой
-в него не входят.
+в него не входят. Нагрузочных тестов в репозитории и CI пока нет.
+Функциональные проверки конкуренции не измеряют пропускную способность,
+latency API или время обработки очереди под устойчивой нагрузкой.
 
 <a id="migrations"></a>
 
@@ -105,11 +111,15 @@ Workflow проверяет сборку и запуск приложения; �
 make migrate
 ```
 
-После новой миграции для Docker:
+При обновлении кода и схемы в уже работающем Docker-окружении сначала
+остановите сервис, затем соберите оба образа, примените миграции и запустите
+новый сервис. PostgreSQL должен уже работать:
 
 ```bash
-docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml build migrate
+docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml stop currency-service
+docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml build migrate currency-service
 docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml run --rm --no-deps migrate
+docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml up -d --no-deps --no-build currency-service
 ```
 
 Миграция [0003_attempt_claim.up.sql](../migrations/0003_attempt_claim.up.sql)
@@ -137,6 +147,11 @@ SQL встроен в бинарник директивой `//go:embed *.up.sql
 но необходима компилятору. Так же функциональна `//go:build integration`
 в интеграционном тесте. Удалять такие директивы при очистке поясняющих
 комментариев нельзя.
+
+Текущая схема получается после применения всех четырёх `.up.sql` по порядку:
+`quote_jobs` без `lease_token` и `idempotency_key`, `quote_values` с
+`NUMERIC(38,18)` и `http_idempotency`. Старые определения в `0001` и `0002`
+описывают промежуточные версии схемы и нужны для последовательного обновления.
 
 <a id="changes"></a>
 

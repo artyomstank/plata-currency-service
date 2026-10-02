@@ -39,6 +39,8 @@
 `ReadTimeout` и `ReadHeaderTimeout`. Лимиты тела и заголовков равны 1 MiB;
 отдельных ENV для них нет. Migrator продолжает использовать тот же загрузчик,
 берёт настройки PostgreSQL и задаёт размер своего пула равным одному.
+Поскольку загрузчик общий, некорректные настройки HTTP, валют или retry
+также не дадут запустить migrator, хотя он использует только PostgreSQL.
 
 <a id="currencies"></a>
 
@@ -91,8 +93,11 @@ services:
 
 ```bash
 docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml \
-  -f deploy/compose.local.yml up -d --no-build --force-recreate currency-service
+  -f deploy/compose.local.yml up -d --no-deps --no-build --force-recreate currency-service
 ```
+
+Команда предполагает уже работающую БД и применённые миграции;
+`--no-deps` пересоздаёт только сервис.
 
 `HTTP_PORT` меняет публикацию порта на хосте, а не порт HTTP внутри контейнера.
 Для подключения из контейнеров используется `postgres:5432`; с хоста —
@@ -116,8 +121,8 @@ docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml \
 | `HTTP_READ_TIMEOUT` | `5s` | Read timeout и read header timeout HTTP-сервера |
 | `HTTP_WRITE_TIMEOUT` | `10s` | Write timeout HTTP-сервера |
 | `HTTP_IDLE_TIMEOUT` | `60s` | Idle timeout keep-alive соединений |
-| `WORKER_COUNT` | `3` | Число параллельных воркеров |
-| `POLL_INTERVAL` | `500ms` | Интервал опроса для каждого воркера |
+| `WORKER_COUNT` | `3` | Число параллельных воркеров на экземпляр сервиса |
+| `POLL_INTERVAL` | `500ms` | Период ticker каждого воркера, в том числе при непустой очереди |
 | `JOB_LEASE_DURATION` | `30s` | Время владения джобой до возможного reclaim |
 | `MAX_ATTEMPTS` | `5` | Лимит при обработке ошибки через RetryOrFail |
 | `RETRY_BASE` | `1s` | Начальная задержка retry |
@@ -133,13 +138,17 @@ docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml \
 `PROVIDER_TIMEOUT`. DSN и HTTP address не могут быть пустыми; URL источника
 требует HTTP(S) и host.
 
+Первый проход воркера выполняется сразу, последующие ждут tick;
+подробности — [цикл воркера](jobs.md#polling).
+
 ## Как соотносятся таймауты
 
 HTTP deadline действует на текущий API-запрос, а не на будущую джобу.
 `PROVIDER_TIMEOUT` ограничивает получение курса воркером. Lease должен
 оставлять запас на сетевой запрос и последующую транзакцию; heartbeat для
 продления lease сейчас нет. При его истечении другой воркер сможет сделать
-reclaim, а прежний потеряет право завершить задачу.
+reclaim. Только после смены номера попытки прежний воркер потеряет право
+завершить задачу; без reclaim истёкший lease сам по себе не запрещает complete.
 
 `SHUTDOWN_TIMEOUT` действует одновременно на ожидание HTTP и воркеров.
 Docker даёт контейнеру `stop_grace_period: 20s`: сначала SIGTERM, затем

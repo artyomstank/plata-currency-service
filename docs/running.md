@@ -2,7 +2,7 @@
 
 [Главная](../README.md) · [Документация](README.md) · [Конфигурация](configuration.md) · [API](api.md)
 
-Все команды ниже запускаются из корня проекта. Для Docker нужны Compose v2
+Все команды ниже запускаются из корня проекта. Для Docker нужны Compose v2 или новее
 и Make; для запуска на хосте и тестов — Go 1.26 согласно [go.mod](../go.mod).
 Локальная PostgreSQL: `localhost:54322`, database/user/password — `postgres`.
 
@@ -115,10 +115,18 @@ docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml restart
 
 ```bash
 docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml \
-  up -d --no-build --force-recreate currency-service
+  up -d --no-deps --no-build --force-recreate currency-service
 ```
 
+БД и миграции при этом уже должны быть готовы: `--no-deps` затрагивает
+только контейнер сервиса.
+
 После изменения Go-кода пересоберите образ через `make docker-up`.
+
+Если обновление включает миграции, сначала остановите все экземпляры
+приложения и выполните [обновление кода и схемы](development.md#migrations).
+Обычный запуск Compose сам по себе не задаёт порядок остановки старых
+воркеров перед изменением несовместимой схемы.
 
 <a id="troubleshooting"></a>
 
@@ -126,7 +134,7 @@ docker compose --env-file deploy/.env.local -f deploy/docker-compose.yml \
 
 | Симптом | Что проверить |
 | --- | --- |
-| Сервис не стартует | Логи service/migrate, `DATABASE_DSN`, валидность ENV, свободный HTTP-порт |
+| Сервис не стартует | Логи `currency-service`/`migrate`, `DATABASE_DSN`, валидность ENV, свободный HTTP-порт |
 | Migrator завершился с ошибкой | Локальная БД, SQL миграций, отсутствие параллельного зависшего migrator |
 | `/readyz` даёт 503 | Доступность PostgreSQL и параметры подключения |
 | POST даёт 400 для новой валюты | Оба кода входят в `ALLOWED_CURRENCIES`, контейнер пересоздан |
